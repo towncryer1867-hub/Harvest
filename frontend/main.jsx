@@ -78,6 +78,7 @@ function SeasonPackRow({ pack, styles }) {
         const res = await fetch(`/api/media/episodes/${pack.id}/entries`);
         const data = await res.json();
         setRawEntries(data.entries || []);
+        console.log(data);
       } catch (e) {
         console.error("Error loading pack entries:", e);
       } finally {
@@ -227,9 +228,9 @@ function ConsumerApp() {
   // Find all unique available numeric seasons across both packs and normal episodes
   const uniqueSeasons = [...new Set(episodes.map(ep => ep.season_number))].sort((a, b) => a - b);
 
-  // Separate regular episodes vs season packs cleanly
-  const rawSeasonPacks = episodes.filter(ep => ep.is_season_pack === true);
-  const rawRegularEpisodes = episodes.filter(ep => ep.is_season_pack !== true);
+  // Separate regular episodes vs season packs cleanly (handling 1/0 or "true"/"false" from DB)
+  const rawSeasonPacks = episodes.filter(ep => String(ep.is_season_pack) === 'true' || ep.is_season_pack === 1 || ep.is_season_pack === true);
+  const rawRegularEpisodes = episodes.filter(ep => !ep.is_season_pack || String(ep.is_season_pack) === 'false' || ep.is_season_pack === 0);
 
   // Filter both groups concurrently against the single dropdown selector value
   const filteredSeasonPacks = seasonFilter === 'all'
@@ -239,7 +240,7 @@ function ConsumerApp() {
   const filteredEpisodes = seasonFilter === 'all' 
     ? rawRegularEpisodes 
     : rawRegularEpisodes.filter(ep => ep.season_number === parseInt(seasonFilter, 10));
-
+    
   return (
     <div style={styles.container}>
       {/* Top Bar Navigation */}

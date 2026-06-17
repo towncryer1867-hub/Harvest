@@ -1,0 +1,57 @@
+services:
+  # 1. Relational Database
+  db:
+    image: postgres:15-alpine
+    container_name: harvest_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db-init:/docker-entrypoint-initdb.d
+
+  # 2. Node.js Backend API & Scraper Pipeline
+  backend:
+    image: node:20-alpine
+    container_name: harvest_backend
+    restart: always
+    working_dir: /usr/src/app
+    volumes:
+      - ./backend:/usr/src/app
+      - /usr/src/app/node_modules
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=${PORT}
+      - NODE_ENV=${NODE_ENV}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_HOST=${DB_HOST}
+      - DB_NAME=${DB_NAME}
+      - DB_PORT=${DB_PORT}
+      - TVDB_API_KEY=${TVDB_API_KEY}
+    depends_on:
+      - db
+    command: sh -c "npm install && npm run dev"
+
+# 3. React Frontend (Vite)
+  frontend:
+    image: node:20-alpine
+    container_name: harvest_frontend
+    restart: always
+    working_dir: /usr/src/app
+    volumes:
+      - ./frontend:/usr/src/app
+      - /usr/src/app/node_modules
+    ports:
+      - "3030:3030" # Changed from "3000:3000"
+    depends_on:
+      - backend
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 3030" # Explicitly force port 3030 and host
+
+volumes:
+  postgres_data:

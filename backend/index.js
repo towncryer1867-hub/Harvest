@@ -305,7 +305,7 @@ app.post('/api/admin/sources', async (req, res) => {
 
 
 
-// API Listener: Run initial scrape and process + check back every 2 min to ensure data is up-to-date
+// API Listener: Run initial scrape and process + check back every 5 min to ensure data is up-to-date
 app.listen(port, async () => {
   console.log(`Harvest Backend listening at http://localhost:${port}`);
   
@@ -314,9 +314,9 @@ app.listen(port, async () => {
   await runScraper(pool);
   await processPendingMatches(pool, tvdb);
 
-  // Poll for pipeline updates periodically every 2 minutes
+  // Poll for pipeline updates periodically every 5 minutes
   setInterval(async () => {
     await runScraper(pool);
     await processPendingMatches(pool, tvdb);
-  }, 2 * 60 * 1000);
+  }, 5 * 60 * 1000);
 });

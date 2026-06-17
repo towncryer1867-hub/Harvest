@@ -64,8 +64,68 @@ function EpisodeRow({ ep, styles }) {
   );
 }
 
+// Extracted Season Pack Row for clean arrangement within its respective accordion
+function SeasonPackRow({ pack, styles }) {
+  const [expanded, setExpanded] = useState(false);
+  const [rawEntries, setRawEntries] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const toggleExpand = async () => {
+    if (!expanded && rawEntries.length === 0) {
+      try {
+        setLoading(true);
+        // Uses a generic or specific endpoint matching your API schema for season pack source file logs
+        const res = await fetch(`/api/media/episodes/${pack.id}/entries`);
+        const data = await res.json();
+        setRawEntries(data.entries || []);
+      } catch (e) {
+        console.error("Error loading pack entries:", e);
+      } finally {
+        setLoading(false);
+      }
+    }
+    setExpanded(!expanded);
+  };
+
+  return (
+    <div style={styles.episodeContainer}>
+      <div style={styles.episodeRow} onClick={toggleExpand}>
+        <div style={{...styles.epNumberBadge, backgroundColor: '#d1e7dd', color: '#0f5132'}}>
+          S{pack.season_number} PACK
+        </div>
+        <div style={styles.epDetails}>
+          <h4 style={styles.epTitle}>{pack.title || `Season ${pack.season_number} Complete Pack`}</h4>
+          <span style={{fontSize: '0.7rem', backgroundColor: '#e2e3e5', padding: '2px 5px', borderRadius: '3px', fontWeight: 'bold'}}>
+            {pack.resolution || ''}
+          </span>
+        </div>
+        <div style={styles.expandArrow}>{expanded ? '▲' : '▼'}</div>
+      </div>
+
+      {expanded && (
+        <div style={styles.rawEntriesPanel}>
+          <h5 style={styles.rawPanelTitle}>Harvested Archives ({rawEntries.length})</h5>
+          {loading ? (
+            <div style={styles.rawLoading}>Querying archives...</div>
+          ) : rawEntries.length === 0 ? (
+            <div style={styles.rawLoading}>No archive logs found.</div>
+          ) : (
+            <div style={styles.rawList}>
+              {rawEntries.map(entry => (
+                <div key={entry.id} style={styles.rawEntryItem}>
+                  <p style={styles.rawEntryTitle}>📦 {entry.title}</p>
+                  <small style={styles.rawEntryMeta}>Scraped: {new Date(entry.date_scraped).toLocaleDateString()}</small>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ConsumerApp() {
-  // 1. Initialize view state directly based on the current URL hash route
   const [view, setView] = useState(window.location.hash === '#admin' ? 'admin' : 'consumer');
   
   const [mediaItems, setMediaItems] = useState([]);
@@ -76,6 +136,10 @@ function ConsumerApp() {
   const [episodes, setEpisodes] = useState([]);
   const [episodesLoading, setEpisodesLoading] = useState(false);
   const [seasonFilter, setSeasonFilter] = useState('all');
+
+  // --- NEW ACCORDION SELECTION STATES ---
+  const [seasonPackOpen, setSeasonPackOpen] = useState(true);
+  const [episodeGuideOpen, setEpisodeGuideOpen] = useState(true);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedType, setSelectedType] = useState('all');
@@ -105,7 +169,6 @@ function ConsumerApp() {
     fetchLibrary();
   }, [searchQuery, selectedType, selectedYear, timeWindow]);
 
-  // 2. Listen for URL changes (back button, forward button, refreshes)
   useEffect(() => {
     const handleHashChange = () => {
       if (window.location.hash === '#admin') {
@@ -119,14 +182,13 @@ function ConsumerApp() {
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
 
-  // 3. Helper functions to update navigation paths
   const navigateToAdmin = () => {
     window.location.hash = 'admin';
   };
 
   const navigateToConsumer = () => {
     window.location.hash = '';
-    setSelectedSeries(null); // Clear active series selections when resetting
+    setSelectedSeries(null);
   };
 
   const handleSelectSeries = async (seriesItem) => {
@@ -151,7 +213,6 @@ function ConsumerApp() {
     setMenuOpen(false);
   };
 
-  // 4. Update the view structural conditional checks
   if (view === 'admin') {
     return (
       <div>
@@ -163,10 +224,21 @@ function ConsumerApp() {
     );
   }
 
+  // Find all unique available numeric seasons across both packs and normal episodes
   const uniqueSeasons = [...new Set(episodes.map(ep => ep.season_number))].sort((a, b) => a - b);
-  const displayedEpisodes = seasonFilter === 'all' 
-    ? episodes 
-    : episodes.filter(ep => ep.season_number === parseInt(seasonFilter, 10));
+
+  // Separate regular episodes vs season packs cleanly
+  const rawSeasonPacks = episodes.filter(ep => ep.is_season_pack === true);
+  const rawRegularEpisodes = episodes.filter(ep => ep.is_season_pack !== true);
+
+  // Filter both groups concurrently against the single dropdown selector value
+  const filteredSeasonPacks = seasonFilter === 'all'
+    ? rawSeasonPacks
+    : rawSeasonPacks.filter(pack => pack.season_number === parseInt(seasonFilter, 10));
+
+  const filteredEpisodes = seasonFilter === 'all' 
+    ? rawRegularEpisodes 
+    : rawRegularEpisodes.filter(ep => ep.season_number === parseInt(seasonFilter, 10));
 
   return (
     <div style={styles.container}>
@@ -211,8 +283,10 @@ function ConsumerApp() {
 
           <hr style={styles.divider} />
 
-          <div style={styles.episodeFilterBar}>
-            <h3 style={styles.episodeHeading}>Episode Guide</h3>
+          {/* =========================================================
+              ROW 1: Isolated Dropdown Selection (Right Aligned)
+             ========================================================= */}
+          <div style={styles.dropdownRow}>
             <select style={styles.seasonDropdown} value={seasonFilter} onChange={(e) => setSeasonFilter(e.target.value)}>
               <option value="all">All Seasons</option>
               {uniqueSeasons.map(season => (
@@ -222,14 +296,56 @@ function ConsumerApp() {
           </div>
 
           {episodesLoading ? (
-            <div style={styles.centered}>Loading episode guide indices...</div>
-          ) : displayedEpisodes.length === 0 ? (
-            <div style={styles.centered}>No harvested episodes found for this selection.</div>
+            <div style={styles.centered}>Loading archive components...</div>
           ) : (
-            <div style={styles.episodeList}>
-              {displayedEpisodes.map(ep => (
-                <EpisodeRow key={ep.id} ep={ep} styles={styles} />
-              ))}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', marginTop: '10px' }}>
+              
+              {/* =========================================================
+                  ROW 2: Collapsible Accordion - Season Packs Section
+                 ========================================================= */}
+              <div style={styles.accordionGroup}>
+                <div style={styles.accordionHeader} onClick={() => setSeasonPackOpen(!seasonPackOpen)}>
+                  <span>📦 Season Packs ({filteredSeasonPacks.length})</span>
+                  <span>{seasonPackOpen ? '▲' : '▼'}</span>
+                </div>
+                {seasonPackOpen && (
+                  <div style={styles.accordionContent}>
+                    {filteredSeasonPacks.length === 0 ? (
+                      <div style={styles.emptyAccordionText}>No custom season batches match filters.</div>
+                    ) : (
+                      <div style={styles.episodeList}>
+                        {filteredSeasonPacks.map(pack => (
+                          <SeasonPackRow key={pack.id} pack={pack} styles={styles} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* =========================================================
+                  ROW 3: Collapsible Accordion - Current Episode Details
+                 ========================================================= */}
+              <div style={styles.accordionGroup}>
+                <div style={styles.accordionHeader} onClick={() => setEpisodeGuideOpen(!episodeGuideOpen)}>
+                  <span>🎬 Episode Guide Details ({filteredEpisodes.length})</span>
+                  <span>{episodeGuideOpen ? '▲' : '▼'}</span>
+                </div>
+                {episodeGuideOpen && (
+                  <div style={styles.accordionContent}>
+                    {filteredEpisodes.length === 0 ? (
+                      <div style={styles.emptyAccordionText}>No individual episodes match filters.</div>
+                    ) : (
+                      <div style={styles.episodeList}>
+                        {filteredEpisodes.map(ep => (
+                          <EpisodeRow key={ep.id} ep={ep} styles={styles} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
             </div>
           )}
         </div>
@@ -326,12 +442,16 @@ const styles = {
   detailYear: { margin: '0 0 10px 0', fontSize: '0.85rem', color: '#6c757d' },
   detailOverview: { margin: 0, fontSize: '0.8rem', color: '#495057', lineHeight: '1.4', display: '-webkit-box', WebkitLineClamp: 4, WebkitBoxOrient: 'vertical', overflow: 'hidden' },
   
-  episodeFilterBar: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '15px 0 10px 0' },
-  episodeHeading: { margin: 0, fontSize: '1rem', fontWeight: 'bold' },
-  seasonDropdown: { padding: '6px 10px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.85rem', backgroundColor: '#fff' },
+  /* --- NEW 3-ROW UI LAYOUT STYLING RULES --- */
+  dropdownRow: { display: 'flex', justifyContent: 'flex-end', width: '100%', marginBottom: '10px' },
+  seasonDropdown: { padding: '6px 12px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.85rem', backgroundColor: '#fff', fontWeight: '600' },
+  accordionGroup: { border: '1px solid #e9ecef', borderRadius: '8px', backgroundColor: '#ffffff', overflow: 'hidden' },
+  accordionHeader: { display: 'flex', justifyContent: 'space-between', padding: '12px 15px', backgroundColor: '#f8f9fa', fontWeight: 'bold', fontSize: '0.85rem', color: '#495057', cursor: 'pointer', userSelect: 'none' },
+  accordionContent: { padding: '10px' },
+  emptyAccordionText: { fontSize: '0.8rem', color: '#adb5bd', textAlign: 'center', padding: '15px 0' },
   
   /* Collapsible Episode Elements */
-  episodeList: { display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '10px' },
+  episodeList: { display: 'flex', flexDirection: 'column', gap: '12px' },
   episodeContainer: { backgroundColor: '#f8f9fa', borderRadius: '8px', border: '1px solid #eee', overflow: 'hidden' },
   episodeRow: { display: 'flex', gap: '12px', padding: '12px', alignItems: 'center', cursor: 'pointer', transition: 'background 0.2s' },
   epNumberBadge: { backgroundColor: '#e9ecef', padding: '6px 8px', borderRadius: '4px', fontSize: '0.75rem', fontWeight: 'bold', color: '#495057', whiteSpace: 'nowrap' },

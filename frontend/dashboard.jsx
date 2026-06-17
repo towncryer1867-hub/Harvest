@@ -8,6 +8,9 @@ function App() {
   const [activeTab, setActiveTab] = useState('feed'); // 'feed', 'sources', 'admin'
   const [manualIds, setManualIds] = useState({}); // Tracks input box states per item row
 
+  // --- NEW FEED FILTER STATE ---
+  const [statusFilter, setStatusFilter] = useState('all'); // 'all', 'matched', 'unmatched', 'failed'
+
   // --- NEW STATES FOR INTERACTIVE FORM CREATION ---
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
@@ -116,6 +119,11 @@ function App() {
     }
   };
 
+  // Filter feed entries dynamically based on chosen status dropdown selection
+  const filteredEntries = statusFilter === 'all'
+    ? entries
+    : entries.filter(entry => entry.match_status === statusFilter);
+
   return (
     <div style={styles.container}>
       <header style={styles.header}>
@@ -148,25 +156,47 @@ function App() {
               <h2 style={styles.sectionTitle}>Latest Ingested Stream</h2>
               <button onClick={fetchData} style={styles.refreshBtn}>🔄 Refresh</button>
             </div>
-            {entries.map(entry => (
-              <div key={entry.id} style={styles.card}>
-                <div style={styles.cardHeader}>
-                  <span style={styles.sourceTag}>{entry.source_name}</span>
-                  <span style={{
-                    ...styles.statusTag, 
-                    backgroundColor: entry.match_status === 'unmatched' ? '#fff3cd' : entry.match_status === 'failed' ? '#f8d7da' : '#d1e7dd',
-                    color: entry.match_status === 'unmatched' ? '#664d03' : entry.match_status === 'failed' ? '#842029' : '#0f5132'
-                  }}>
-                    {entry.match_status}
-                  </span>
+
+            {/* =========================================================
+                NEW FILTER ROW COMPONENT (FEED TAB STATUS SELECTOR)
+               ========================================================= */}
+            <div style={styles.filterRow}>
+              <label style={styles.filterLabel}>Filter Status:</label>
+              <select 
+                style={styles.filterDropdown} 
+                value={statusFilter} 
+                onChange={(e) => setStatusFilter(e.target.value)}
+              >
+                <option value="all">All Entries ({entries.length})</option>
+                <option value="matched">Matched Only</option>
+                <option value="unmatched">Unmatched (Pending)</option>
+                <option value="failed">Failed Only</option>
+              </select>
+            </div>
+
+            {filteredEntries.length === 0 ? (
+              <div style={styles.centered}>No data entries match the selected status category.</div>
+            ) : (
+              filteredEntries.map(entry => (
+                <div key={entry.id} style={styles.card}>
+                  <div style={styles.cardHeader}>
+                    <span style={styles.sourceTag}>{entry.source_name}</span>
+                    <span style={{
+                      ...styles.statusTag, 
+                      backgroundColor: entry.match_status === 'unmatched' ? '#fff3cd' : entry.match_status === 'failed' ? '#f8d7da' : '#d1e7dd',
+                      color: entry.match_status === 'unmatched' ? '#664d03' : entry.match_status === 'failed' ? '#842029' : '#0f5132'
+                    }}>
+                      {entry.match_status}
+                    </span>
+                  </div>
+                  <h3 style={styles.entryTitle}>{entry.title}</h3>
+                  <div style={styles.metaRow}>
+                    <span>🗂️ {entry.category}</span>
+                    <span>📅 {new Date(entry.date_published).toLocaleDateString()}</span>
+                  </div>
                 </div>
-                <h3 style={styles.entryTitle}>{entry.title}</h3>
-                <div style={styles.metaRow}>
-                  <span>🗂️ {entry.category}</span>
-                  <span>📅 {new Date(entry.date_published).toLocaleDateString()}</span>
-                </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         ) : activeTab === 'sources' ? (
           /* SOURCES TAB PANEL (WITH ADD FORM INTEGRATED) */
@@ -293,7 +323,7 @@ function App() {
   )
 }
 
-// Styling parameters (Extended for form presentation styles)
+// Styling parameters (Extended for form and filter presentation styles)
 const styles = {
   container: { maxWidth: '500px', margin: '0 auto', backgroundColor: '#f8f9fa', minHeight: '100vh', fontFamily: 'sans-serif', color: '#212529' },
   header: { backgroundColor: '#198754', color: '#ffffff', padding: '20px 15px', textAlign: 'center' },
@@ -324,6 +354,11 @@ const styles = {
   fixInput: { flex: 1, padding: '6px 10px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.85rem' },
   fixBtn: { padding: '6px 14px', backgroundColor: '#198754', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: '600', cursor: 'pointer' },
   
+  /* --- NEW FEED STATUS FILTER RULES --- */
+  filterRow: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '15px', backgroundColor: '#fff', padding: '10px', borderRadius: '8px', border: '1px solid #e9ecef' },
+  filterLabel: { fontSize: '0.85rem', fontWeight: 'bold', color: '#495057' },
+  filterDropdown: { flex: 1, padding: '6px 10px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.85rem', backgroundColor: '#ffffff', cursor: 'pointer' },
+
   /* --- NEW FORM DESIGN OBJECT VALUES --- */
   formCard: { backgroundColor: '#ffffff', borderRadius: '8px', padding: '15px', border: '1px solid #e9ecef' },
   formLayout: { display: 'flex', flexDirection: 'column', gap: '10px' },

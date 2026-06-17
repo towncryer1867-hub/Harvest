@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS metadata_episodes (
     title VARCHAR(255),
     overview TEXT,
     air_date VARCHAR(50),
+    is_season_pack BOOLEAN DEFAULT FALSE,
     -- This enforces uniqueness across the parent show, season number, and episode number
     CONSTRAINT unique_show_season_episode UNIQUE (metadata_item_id, season_number, episode_number)
 );
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS scraped_entries (
     category VARCHAR(255),
     description TEXT,
     magnet_link TEXT,
+    is_season_pack BOOLEAN DEFAULT FALSE,
     date_published TIMESTAMP WITH TIME ZONE,
     date_scraped TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     match_status VARCHAR(20) DEFAULT 'unmatched' -- 'unmatched', 'matched', 'ignored'

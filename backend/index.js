@@ -256,19 +256,6 @@ app.get('/api/media/episodes/:id/entries', async (req, res) => {
       CROSS JOIN target_ep te
       WHERE se.metadata_item_id = te.metadata_item_id
         AND (
-          -- CASE 1: The clicked target is explicitly a season pack
-          (
-            te.is_season_pack = true
-            AND se.is_season_pack = true
-            -- Matches any variation containing S04 or Season 4
-            AND (
-              se.title ILIKE CONCAT('%S', LPAD(te.season_number::text, 2, '0'), '%')
-              OR se.title ILIKE CONCAT('%S', te.season_number::text, '%')
-              OR se.title ILIKE CONCAT('%Season%', te.season_number::text, '%')
-            )
-          )
-          OR
-          -- CASE 2: Standard Individual Episode Matching
           (
             COALESCE(te.is_season_pack, false) = false
             AND (
@@ -289,6 +276,49 @@ app.get('/api/media/episodes/:id/entries', async (req, res) => {
   }
 });
 
+// API Route: Retrieve all raw scraped season packs matching a specific show ID
+app.get('/api/media/episodes/:id/packentries', async (req, res) => {
+  const { id } = req.params;
+  
+  try {
+    const query = `
+      WITH target_ep AS (
+        SELECT metadata_item_id, season_number, is_season_pack 
+        FROM metadata_episodes 
+        WHERE id = $1
+      )
+      SELECT 
+        se.id, 
+        se.title, 
+        se.category, 
+        -- Select both possible naming variations safely so frontend never breaks
+        COALESCE(se.date_scraped, se.date_published) AS date_scraped, 
+        se.is_season_pack 
+      FROM scraped_entries se
+      CROSS JOIN target_ep te
+      WHERE se.metadata_item_id = te.metadata_item_id
+        AND (
+          (
+            te.is_season_pack = true
+            AND se.is_season_pack = true
+            -- Matches any variation containing S04 or Season 4
+            AND (
+              se.title ILIKE CONCAT('%S', LPAD(te.season_number::text, 2, '0'), '%')
+              OR se.title ILIKE CONCAT('%S', te.season_number::text, '%')
+              OR se.title ILIKE CONCAT('%Season%', te.season_number::text, '%')
+            )
+          )
+        )
+      ORDER BY date_scraped DESC;
+    `;
+    
+    const results = await pool.query(query, [parseInt(id, 10)]);
+    res.json({ count: results.rowCount, entries: results.rows });
+  } catch (error) {
+    console.error("Failed to fetch raw entries for episode:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 
 

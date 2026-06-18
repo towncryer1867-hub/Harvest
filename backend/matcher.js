@@ -112,6 +112,12 @@ async function processPendingMatches(pool, tvdb) {
               [finalMetadataId, parsed.season, 0, 'Season Pack', true]
             );
             
+            // update scraped_entries with season pack flag
+            await pool.query(
+              "UPDATE scraped_entries SET is_season_pack = $1 WHERE id = $2",
+              [true, entry.id]
+            );
+
             console.log(`Matched Season Pack: "${parsed.season}"`);
           }
 

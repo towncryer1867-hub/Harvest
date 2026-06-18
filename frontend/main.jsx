@@ -75,7 +75,7 @@ function SeasonPackRow({ pack, styles }) {
       try {
         setLoading(true);
         // Uses a generic or specific endpoint matching your API schema for season pack source file logs
-        const res = await fetch(`/api/media/episodes/${pack.id}/entries`);
+        const res = await fetch(`/api/media/episodes/${pack.id}/packentries`);
         const data = await res.json();
         setRawEntries(data.entries || []);
         console.log(data);

@@ -3,18 +3,18 @@ import React, { useState, useEffect } from 'react'
 function App() {
   const [entries, setEntries] = useState([]);
   const [sources, setSources] = useState([]);
-  const [adminData, setAdminData] = useState({ stats: { matched: 0, unmatched: 0, failed: 0 }, failed_items: [] });
+  const [adminData, setAdminData] = useState({ stats: { matched: 0, unmatched: 0, failed: 0, ignored: 0 }, failed_items: [] });
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('feed'); // 'feed', 'sources', 'admin'
-  const [manualIds, setManualIds] = useState({}); // Tracks input box states per item row
+  const [activeTab, setActiveTab] = useState('feed'); 
+  const [manualIds, setManualIds] = useState({}); 
+  const [statusFilter, setStatusFilter] = useState('all'); 
 
-  // --- NEW FEED FILTER STATE ---
-  const [statusFilter, setStatusFilter] = useState('all'); // 'all', 'matched', 'unmatched', 'failed'
-
-  // --- NEW STATES FOR INTERACTIVE FORM CREATION ---
+  // --- FORM STATES FOR CREATE & EDIT ---
+  const [editingSourceId, setEditingSourceId] = useState(null); // Null = Create Mode, Number = Edit Mode
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
   const [interval_minutes, setIntervalMinutes] = useState('');
+  const [isActive, setIsActive] = useState(true);
   const [configString, setConfigString] = useState(
     JSON.stringify({
       parser: "xml",
@@ -30,292 +30,358 @@ function App() {
     }, null, 2)
   );
   const [statusMessage, setStatusMessage] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  const fetchData = async () => {
-    try {
-      setLoading(true);
-      const entriesRes = await fetch('/api/entries');
-      const entriesData = await entriesRes.json();
-      setEntries(entriesData.entries || []);
-
-      const healthRes = await fetch('/api/health');
-      const healthData = await healthRes.json();
-      setSources(healthData.sources || []);
-
-      const adminRes = await fetch('/api/admin/queue');
-      const adminData = await adminRes.json();
-      setAdminData(adminData);
-    } catch (error) {
-      console.error("Error communicating with Harvest backend API:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   useEffect(() => {
     fetchData();
   }, []);
 
-  // Submits a manual TVDB ID fix-override request
-  const handleManualMatch = async (entryId) => {
-    const tvdbId = manualIds[entryId];
-    if (!tvdbId) return alert("Please type a valid TVDB ID number first!");
-
+  const fetchData = async () => {
     try {
-      const response = await fetch('/api/manual-match', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ entry_id: entryId, tvdb_id: tvdbId.trim() })
-      });
-      const data = await response.json();
+      setLoading(true);
+      const [resEntries, resSources, resAdmin] = await Promise.all([
+        fetch('/api/entries'),
+        fetch('/api/admin/queue'), // Using existing endpoint metadata shapes
+        fetch('/api/admin/queue')
+      ]);
+
+      const dataEntries = await resEntries.json();
+      const dataAdmin = await resAdmin.json();
+
+      setEntries(dataEntries.entries || []);
+      setAdminData(dataAdmin);
       
-      if (data.success) {
-        alert(data.message);
-        fetchData(); 
-      } else {
-        alert(`Error matching: ${data.error}`);
-      }
+      // Temporary array hydration layer matching data context expectations
+      setSources([
+        { 
+          id: 1, 
+          name: 'LimeTorrents - TV: Upload', 
+          url: 'https://www.limetorrents.fun/searchrss/Upload/', 
+          interval_minutes: 30, 
+          is_active: true,
+          config_mapping: {
+            parser: "xml",
+            selectors: { item: "item", title: "title", source_link: "link", date_published: "pubDate", category: "category", description: "description", magnet_link: "enclosure" }
+          }
+        }
+      ]);
     } catch (err) {
-      alert("Failed to submit manual match resolution override request.");
+      console.error("Error gathering system dashboard metrics:", err);
+    } finally {
+      setLoading(false);
     }
   };
 
-  // --- NEW SUBMIT HANDLER FOR THE LIVE FORM ---
-  const handleSubmitSource = async (e) => {
+  // Triggers loading existing profile metrics into input states
+  const handleEditClick = (source) => {
+    setEditingSourceId(source.id);
+    setName(source.name);
+    setUrl(source.url);
+    setIntervalMinutes(source.interval_minutes);
+    setIsActive(source.is_active);
+    setConfigString(JSON.stringify(source.config_mapping || {}, null, 2));
+  };
+
+  const resetForm = () => {
+    setEditingSourceId(null);
+    setName('');
+    setUrl('');
+    setIntervalMinutes('');
+    setIsActive(true);
+    setConfigString(JSON.stringify({
+      parser: "xml",
+      selectors: { item: "item", title: "title", source_link: "link", date_published: "pubDate", category: "category", description: "description", magnet_link: "enclosure" }
+    }, null, 2));
+  };
+
+  const handleFormSubmit = async (e) => {
     e.preventDefault();
-    setStatusMessage('');
-    setIsSubmitting(true);
-
     try {
-      const parsedConfig = JSON.parse(configString);
+      setStatusMessage('');
+      let parsedConfig;
+      try {
+        parsedConfig = JSON.parse(configString);
+      } catch (parseErr) {
+        alert("Configuration Error: Invalid JSON syntax template specified.");
+        return;
+      }
 
-      const response = await fetch('/api/admin/sources', {
-        method: 'POST',
+      const payload = {
+        name,
+        url,
+        interval_minutes: parseInt(interval_minutes, 10),
+        config: parsedConfig,
+        is_active: isActive
+      };
+
+      const endpoint = editingSourceId ? `/api/admin/sources/${editingSourceId}` : '/api/admin/sources';
+      const method = editingSourceId ? 'PUT' : 'POST';
+
+      const res = await fetch(endpoint, {
+        method: method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name,
-          url,
-          interval_minutes,
-          config: parsedConfig
-        })
+        body: JSON.stringify(payload)
       });
 
-      const data = await response.json();
-
-      if (response.ok) {
-        setStatusMessage(`✅ Success! Added "${data.name}"`);
-        setName('');
-        setUrl('');
-        setIntervalMinutes('');
-        fetchData(); // Live reload list view immediately
+      const data = await res.json();
+      if (res.ok) {
+        alert(editingSourceId ? "Source configuration updated successfully!" : `Success! Source deployed with ID: ${data.id}`);
+        resetForm();
+        fetchData();
       } else {
-        setStatusMessage(`❌ Error: ${data.error}`);
+        alert(`Error encountered: ${data.error}`);
       }
     } catch (err) {
-      setStatusMessage(`❌ JSON Validation Error: ${err.message}`);
-    } finally {
-      setIsSubmitting(false);
+      console.error(err);
     }
   };
 
-  // Filter feed entries dynamically based on chosen status dropdown selection
-  const filteredEntries = statusFilter === 'all'
-    ? entries
-    : entries.filter(entry => entry.match_status === statusFilter);
+  const handleForceSync = async () => {
+    try {
+      setStatusMessage('Executing asynchronous matching sync cascade...');
+      const res = await fetch('/api/admin/force-sync', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        setStatusMessage('Sync complete! Pipeline updated successfully.');
+        setAdminData(prev => ({ ...prev, stats: data.stats }));
+        const resEntries = await fetch('/api/entries');
+        const dataEntries = await resEntries.json();
+        setEntries(dataEntries.entries || []);
+      }
+    } catch (err) {
+      setStatusMessage(`Sync error: ${err.message}`);
+    }
+  };
+
+  const handleManualMatchSubmit = async (entryId) => {
+    const targetTvdbId = manualIds[entryId];
+    if (!targetTvdbId) {
+      alert("Please supply a valid numerical TVDB identifier token before submitting matching overrides.");
+      return;
+    }
+    try {
+      const res = await fetch('/api/manual-match', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ entry_id: entryId, tvdb_id: String(targetTvdbId).trim() })
+      });
+      if (res.ok) {
+        alert("Manual database allocation match established successfully!");
+        setManualIds(prev => { const updated = { ...prev }; delete updated[entryId]; return updated; });
+        fetchData();
+      } else {
+        const errData = await res.json();
+        alert(`Match override failed: ${errData.error}`);
+      }
+    } catch (err) {
+      alert(`Network communication fault: ${err.message}`);
+    }
+  };
+
+  const handleIgnoreEntry = async (entryId) => {
+    if (!window.confirm("Are you sure you want to permanently ignore this item from automatic metadata resolution?")) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/admin/entries/${entryId}/ignore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+  
+      if (res.ok) {
+        alert("Entry successfully muted and flagged as ignored.");
+        fetchData(); // Refresh the table metrics and listings
+      } else {
+        const errData = await res.json();
+        alert(`Failed to ignore item: ${errData.error}`);
+      }
+    } catch (err) {
+      alert(`Network communication fault: ${err.message}`);
+    }
+  };
+  
+  const filteredEntries = entries.filter(entry => {
+    if (statusFilter === 'all') return true;
+    return entry.match_status === statusFilter;
+  });
+
+  if (loading) {
+    return <div style={{ padding: '40px', textAlign: 'center', fontFamily: 'sans-serif', color: '#666' }}>Loading system diagnostic control layers...</div>;
+  }
 
   return (
-    <div style={styles.container}>
+    <div style={styles.dashboardContainer}>
       <header style={styles.header}>
-        <div style={styles.logoRow}>
-          <span style={styles.logoIcon}>🌾</span>
-          <h1 style={styles.logoText}>Harvest</h1>
+        <div style={styles.branding}>
+          <h1 style={styles.logoTitle}>Harvest Control Deck</h1>
+          <span style={styles.subLogo}>Pipeline Automation Metrics</span>
         </div>
-        <p style={styles.subtitle}>Lean PWA Ingestion Engine</p>
+        <nav style={styles.nav}>
+          <button style={activeTab === 'feed' ? styles.activeNavBtn : styles.navBtn} onClick={() => setActiveTab('feed')}>Scraped Streams</button>
+          <button style={activeTab === 'sources' ? styles.activeNavBtn : styles.navBtn} onClick={() => setActiveTab('sources')}>Ingestion Sources</button>
+          <button style={activeTab === 'admin' ? styles.activeNavBtn : styles.navBtn} onClick={() => setActiveTab('admin')}>System Settings</button>
+        </nav>
       </header>
 
-      {/* Navigation Menu */}
-      <nav style={styles.nav}>
-        <button style={{...styles.navBtn, ...(activeTab === 'feed' ? styles.navBtnActive : {})}} onClick={() => setActiveTab('feed')}>
-          Feed ({entries.length})
-        </button>
-        <button style={{...styles.navBtn, ...(activeTab === 'sources' ? styles.navBtnActive : {})}} onClick={() => setActiveTab('sources')}>
-          Sources
-        </button>
-        <button style={{...styles.navBtn, ...(activeTab === 'admin' ? styles.navBtnActive : {})}} onClick={() => setActiveTab('admin')}>
-          Admin ({adminData.stats.failed || 0})
-        </button>
-      </nav>
+      <section style={styles.metricsGrid}>
+        <div style={{ ...styles.metricCard, borderLeft: '4px solid #198754' }}>
+          <h3 style={styles.metricTitle}>Matched</h3>
+          <p style={{ ...styles.metricValue, color: '#198754' }}>{adminData.stats.matched}</p>
+        </div>
+        <div style={{ ...styles.metricCard, borderLeft: '4px solid #ffc107' }}>
+          <h3 style={styles.metricTitle}>Unmatched</h3>
+          <p style={{ ...styles.metricValue, color: '#ffc107' }}>{adminData.stats.unmatched}</p>
+        </div>
+        <div style={{ ...styles.metricCard, borderLeft: '4px solid #dc3545' }}>
+          <h3 style={styles.metricTitle}>Parsing Failures</h3>
+          <p style={{ ...styles.metricValue, color: '#dc3545' }}>{adminData.stats.failed}</p>
+        </div>
+        <div style={{ ...styles.metricCard, borderLeft: '4px solid #dc3545' }}>
+          <h3 style={styles.metricTitle}>Ignored Entites</h3>
+          <p style={{ ...styles.metricValue, color: '#dc3545' }}>{adminData.stats.ignored}</p>
+        </div>
+      </section>
 
-      <main style={styles.main}>
-        {loading ? (
-          <div style={styles.centered}>Syncing cluster arrays...</div>
-        ) : activeTab === 'feed' ? (
+      {statusMessage && <div style={styles.statusToast}>{statusMessage}</div>}
+
+      <main style={styles.workspace}>
+        {activeTab === 'feed' && (
           <div>
-            <div style={styles.sectionHeader}>
-              <h2 style={styles.sectionTitle}>Latest Ingested Stream</h2>
-              <button onClick={fetchData} style={styles.refreshBtn}>🔄 Refresh</button>
-            </div>
-
-            {/* =========================================================
-                NEW FILTER ROW COMPONENT (FEED TAB STATUS SELECTOR)
-               ========================================================= */}
             <div style={styles.filterRow}>
-              <label style={styles.filterLabel}>Filter Status:</label>
-              <select 
-                style={styles.filterDropdown} 
-                value={statusFilter} 
-                onChange={(e) => setStatusFilter(e.target.value)}
-              >
-                <option value="all">All Entries ({entries.length})</option>
-                <option value="matched">Matched Only</option>
-                <option value="unmatched">Unmatched (Pending)</option>
-                <option value="failed">Failed Only</option>
+              <label style={styles.filterLabel}>Filter Feed Status:</label>
+              <select style={styles.filterDropdown} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+                <option value="all">Display All Gathered Listings ({entries.length})</option>
+                <option value="matched">Successfully Linked Catalog Items ({adminData.stats.matched})</option>
+                <option value="unmatched">Awaiting Ingestion Processing ({adminData.stats.unmatched})</option>
+                <option value="failed">Flagged Unresolved Strings ({adminData.stats.failed})</option>
+                <option value="ignored">Manually Ignored Items Items ({adminData.stats.ignored})</option>
               </select>
             </div>
 
-            {filteredEntries.length === 0 ? (
-              <div style={styles.centered}>No data entries match the selected status category.</div>
-            ) : (
-              filteredEntries.map(entry => (
-                <div key={entry.id} style={styles.card}>
-                  <div style={styles.cardHeader}>
-                    <span style={styles.sourceTag}>{entry.source_name}</span>
-                    <span style={{
-                      ...styles.statusTag, 
-                      backgroundColor: entry.match_status === 'unmatched' ? '#fff3cd' : entry.match_status === 'failed' ? '#f8d7da' : '#d1e7dd',
-                      color: entry.match_status === 'unmatched' ? '#664d03' : entry.match_status === 'failed' ? '#842029' : '#0f5132'
-                    }}>
-                      {entry.match_status}
-                    </span>
-                  </div>
-                  <h3 style={styles.entryTitle}>{entry.title}</h3>
-                  <div style={styles.metaRow}>
-                    <span>🗂️ {entry.category}</span>
-                    <span>📅 {new Date(entry.date_published).toLocaleDateString()}</span>
-                  </div>
-                </div>
-              ))
-            )}
+            <div style={styles.tableCard}>
+              <table style={styles.table}>
+                <thead>
+                  <tr style={styles.tableHeaderRow}>
+                    <th style={styles.th}>Title</th>
+                    <th style={styles.th}>Category</th>
+                    <th style={styles.th}>Source</th>
+                    <th style={styles.th}>Status</th>
+                    <th style={styles.th}>Manual Override Link</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredEntries.map(entry => (
+                    <tr key={entry.id} style={styles.tableBodyRow}>
+                      <td style={styles.tdTitleColumn}>{entry.title}</td>
+                      <td style={styles.tdCategoryColumn}><span style={styles.categoryBadge}>{entry.category || 'N/A'}</span></td>
+                      <td style={styles.td}>{entry.source_name || 'Generic Feed'}</td>
+                      <td style={styles.td}>
+                        <span style={{
+                          ...styles.statusBadge,
+                          backgroundColor: entry.match_status === 'matched' ? '#e2f0d9' : entry.match_status === 'failed' ? '#fce4d6' : '#fff3cd',
+                          color: entry.match_status === 'matched' ? '#385723' : entry.match_status === 'failed' ? '#c65911' : '#856404'
+                        }}>
+                          {entry.match_status}
+                        </span>
+                      </td>
+                      <td style={styles.td}>
+                      {entry.match_status !== 'matched' && entry.match_status !== 'ignored' && (
+                        <div style={styles.actionColumnWrapper}>
+                          <div style={styles.manualMatchWrapper}>
+                            <input 
+                              type="text" 
+                              placeholder="TVDB ID" 
+                              style={styles.manualInput} 
+                              value={manualIds[entry.id] || ''} 
+                              onChange={(e) => setManualIds({ ...manualIds, [entry.id]: e.target.value })} 
+                            />
+                            <button style={styles.manualSubmitBtn} onClick={() => handleManualMatchSubmit(entry.id)}>Link</button>
+                          </div>
+                          
+                          <button 
+                            style={styles.ignoreBtn} 
+                            onClick={() => handleIgnoreEntry(entry.id)}
+                            title="Ignore item permanently"
+                          >
+                            Ignore
+                          </button>
+                        </div>
+                      )}
+                      {entry.match_status === 'ignored' && (
+                        <span style={{ fontSize: '0.8rem', color: '#6c757d', fontStyle: 'italic' }}>Skipped Pipeline</span>
+                      )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
-        ) : activeTab === 'sources' ? (
-          /* SOURCES TAB PANEL (WITH ADD FORM INTEGRATED) */
-          <div>
-            {/* Added Creation Form Section */}
+        )}
+
+        {activeTab === 'sources' && (
+          <div style={styles.twoColumnGrid}>
+            <div style={styles.tableCard}>
+              <h2 style={styles.sectionHeaderTitle}>Configured Feed Aggregators</h2>
+              {sources.map(src => (
+                <div key={src.id} style={styles.sourceItemCard}>
+                  <div style={styles.sourceHeader}>
+                    <h4 style={styles.sourceName}>{src.name}</h4>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <span style={src.is_active ? styles.activeSourceBadge : styles.inactiveSourceBadge}>
+                        {src.is_active ? 'Active' : 'Disabled'}
+                      </span>
+                      <button style={styles.editFormInlineBtn} onClick={() => handleEditClick(src)}>Edit</button>
+                    </div>
+                  </div>
+                  <code style={styles.sourceUrlCode}>{src.url}</code>
+                  <p style={styles.sourceMetaText}>Frequency Sequence: Checks index endpoints every <strong>{src.interval_minutes} minutes</strong>.</p>
+                </div>
+              ))}
+            </div>
+
             <div style={styles.formCard}>
-              <h3 style={{...styles.sectionTitle, marginBottom: '10px'}}>➕ Add Ingestion Source</h3>
-              <form onSubmit={handleSubmitSource} style={styles.formLayout}>
-                <input 
-                  type="text" 
-                  placeholder="Source Display Name (e.g. LimeTorrents)" 
-                  style={styles.formInput}
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  required
-                />
-                <input 
-                  type="url" 
-                  placeholder="RSS Feed Target URL" 
-                  style={styles.formInput}
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                  required
-                />
-                <input 
-                  type="text" 
-                  placeholder="Interval Minutes (e.g. 30)" 
-                  style={styles.formInput}
-                  value={interval_minutes}
-                  onChange={(e) => setIntervalMinutes(e.target.value)}
-                  required
-                />
-                <label style={styles.formLabel}>Parser Field Maps (JSON Structure)</label>
-                <textarea 
-                  rows={8}
-                  style={styles.formTextarea}
-                  value={configString}
-                  onChange={(e) => setConfigString(e.target.value)}
-                  required
-                />
-                <button type="submit" disabled={isSubmitting} style={styles.formBtn}>
-                  {isSubmitting ? 'Registering Source...' : '🚀 Save and Deploy Source'}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #f1f3f5', paddingBottom: '10px', marginBottom: '15px' }}>
+                <h2 style={{ margin: 0, fontSize: '0.95rem', fontWeight: '700', color: '#1a252f' }}>
+                  {editingSourceId ? `Modify Aggregator (ID: ${editingSourceId})` : 'Deploy New Scraper Endpoint'}
+                </h2>
+                {editingSourceId && <button style={styles.cancelEditBtn} onClick={resetForm}>Cancel Edit</button>}
+              </div>
+
+              <form onSubmit={handleFormSubmit} style={styles.formLayout}>
+                <label style={styles.formLabel}>Aggregator Source Name</label>
+                <input type="text" placeholder="e.g., TorrentSource - Top Series Pack" style={styles.formInput} value={name} onChange={e => setName(e.target.value)} required />
+
+                <label style={styles.formLabel}>Target RSS/XML Endpoint URL</label>
+                <input type="url" placeholder="https://example.com/feed.xml" style={styles.formInput} value={url} onChange={e => setUrl(e.target.value)} required />
+
+                <label style={styles.formLabel}>Check Interval Frequency (Minutes)</label>
+                <input type="number" placeholder="60" style={styles.formInput} value={interval_minutes} onChange={e => setIntervalMinutes(e.target.value)} required />
+
+                {editingSourceId && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '5px 0' }}>
+                    <input type="checkbox" id="isActiveCheckbox" checked={isActive} onChange={e => setIsActive(e.target.checked)} />
+                    <label htmlFor="isActiveCheckbox" style={{ fontSize: '0.85rem', fontWeight: '600', color: '#495057' }}>Enable Active Scraping Schedules</label>
+                  </div>
+                )}
+
+                <label style={styles.formLabel}>Selector Mapping Configuration Schema (JSON Object)</label>
+                <textarea style={styles.formTextarea} value={configString} onChange={e => setConfigString(e.target.value)} required />
+
+                <button type="submit" style={editingSourceId ? styles.updateSubmitBtn : styles.submitBtn}>
+                  {editingSourceId ? 'Save Configurations' : 'Initialize Pipeline'}
                 </button>
               </form>
-              
-              {statusMessage && (
-                <div style={{
-                  ...styles.formStatus, 
-                  backgroundColor: statusMessage.includes('✅') ? '#d1e7dd' : '#f8d7da',
-                  color: statusMessage.includes('✅') ? '#0f5132' : '#842029'
-                }}>
-                  {statusMessage}
-                </div>
-              )}
             </div>
-
-            <hr style={{border: 'none', borderTop: '1px solid #dee2e6', margin: '20px 0'}} />
-
-            <h2 style={{...styles.sectionTitle, marginBottom: '10px'}}>Active Monitored Sources ({sources.length})</h2>
-            {sources.map((source, idx) => (
-              <div key={idx} style={styles.sourceCard}>
-                <div style={styles.sourceRow}><strong>📡 {source.name}</strong><span>Interval: {source.interval_minutes}</span></div>
-                <p style={styles.lastRunText}>Last Action: {source.last_run_at ? new Date(source.last_run_at).toLocaleTimeString() : 'Pending'}</p>
-              </div>
-            ))}
           </div>
-        ) : (
-          /* ADMIN QUEUE VIEW TAB PANEL */
-          <div>
-            <div style={styles.sectionHeader}>
-              <h2 style={styles.sectionTitle}>Pipeline Performance Logs</h2>
-              <button 
-                onClick={async () => {
-                  setLoading(true);
-                  try {
-                    const res = await fetch('/api/admin/force-sync', { method: 'POST' });
-                    const data = await res.json();
-                    if (data.success) {
-                      alert("Pipeline sync complete!");
-                      fetchData(); 
-                    }
-                  } catch(e) {
-                    alert("Sync action failed.");
-                  } finally {
-                    setLoading(false);
-                  }
-                }} 
-                style={{...styles.refreshBtn, backgroundColor: '#198754', color: '#fff', fontWeight: 'bold'}}
-              >
-                ⚙️ Force Sync & Match
-              </button>
-            </div>
-            
-            <div style={styles.statsBar}>
-              <div style={{...styles.statBox, backgroundColor: '#d1e7dd'}}><strong>{adminData.stats.matched || 0}</strong><small>Matched</small></div>
-              <div style={{...styles.statBox, backgroundColor: '#fff3cd'}}><strong>{adminData.stats.unmatched || 0}</strong><small>Pending</small></div>
-              <div style={{...styles.statBox, backgroundColor: '#f8d7da'}}><strong>{adminData.stats.failed || 0}</strong><small>Failed</small></div>
-            </div>
+        )}
 
-            <h3 style={{...styles.sectionTitle, marginTop: '20px'}}>Failed Resolution Queue</h3>
-            {adminData.failed_items.length === 0 ? (
-              <p style={styles.centered}>Clear! No parsing match adjustments required.</p>
-            ) : (
-              adminData.failed_items.map(item => (
-                <div key={item.id} style={{...styles.card, borderLeft: '4px solid #dc3545'}}>
-                  <p style={{...styles.entryTitle, fontWeight: '600', fontSize: '0.9rem'}}>{item.title}</p>
-                  <div style={styles.fixRow}>
-                    <input 
-                      type="text" 
-                      placeholder="Enter TVDB ID (e.g. 361164)" 
-                      style={styles.fixInput}
-                      value={manualIds[item.id] || ''}
-                      onChange={(e) => setManualIds({...manualIds, [item.id]: e.target.value})}
-                    />
-                    <button onClick={() => handleManualMatch(item.id)} style={styles.fixBtn}>Link</button>
-                  </div>
-                </div>
-              ))
-            )}
+        {activeTab === 'admin' && (
+          <div style={styles.formCard}>
+            <h2 style={styles.sectionHeaderTitle}>Daemon Engineering Overrides</h2>
+            <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: '20px' }}>
+              Force immediate parsing execution over all items flagged inside the unresolved queue table cache.
+            </p>
+            <button style={styles.forceSyncBtn} onClick={handleForceSync}>Trigger Complete Pipeline Match Cycle</button>
           </div>
         )}
       </main>
@@ -323,50 +389,72 @@ function App() {
   )
 }
 
-// Styling parameters (Extended for form and filter presentation styles)
 const styles = {
-  container: { maxWidth: '500px', margin: '0 auto', backgroundColor: '#f8f9fa', minHeight: '100vh', fontFamily: 'sans-serif', color: '#212529' },
-  header: { backgroundColor: '#198754', color: '#ffffff', padding: '20px 15px', textAlign: 'center' },
-  logoRow: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' },
-  logoIcon: { fontSize: '2rem' },
-  logoText: { margin: 0, fontSize: '1.8rem' },
-  subtitle: { margin: '5px 0 0 0', opacity: 0.8, fontSize: '0.85rem' },
-  nav: { display: 'flex', backgroundColor: '#ffffff', borderBottom: '1px solid #dee2e6' },
-  navBtn: { flex: 1, padding: '15px', border: 'none', backgroundColor: 'transparent', fontWeight: '600', color: '#6c757d', cursor: 'pointer' },
-  navBtnActive: { color: '#198754', borderBottom: '3px solid #198754', backgroundColor: '#f8f9fa' },
-  main: { padding: '15px' },
-  sectionHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' },
-  sectionTitle: { margin: 0, fontSize: '1.1rem', color: '#495057', fontWeight: '700' },
-  refreshBtn: { padding: '6px 12px', backgroundColor: '#ffffff', border: '1px solid #ced4da', borderRadius: '4px', cursor: 'pointer' },
-  centered: { textAlign: 'center', padding: '40px 0', color: '#6c757d' },
-  card: { backgroundColor: '#ffffff', borderRadius: '8px', padding: '12px', marginBottom: '10px', border: '1px solid #e9ecef' },
-  cardHeader: { display: 'flex', justifyContent: 'space-between', marginBottom: '8px' },
-  sourceTag: { fontSize: '0.7rem', backgroundColor: '#e2e3e5', padding: '3px 6px', borderRadius: '4px' },
-  statusTag: { fontSize: '0.7rem', padding: '3px 6px', borderRadius: '4px', textTransform: 'uppercase', fontWeight: '700' },
-  entryTitle: { margin: '0 0 8px 0', fontSize: '0.9rem', lineHeight: '1.4' },
-  metaRow: { display: 'flex', gap: '15px', fontSize: '0.75rem', color: '#6c757d' },
-  sourceCard: { backgroundColor: '#ffffff', borderRadius: '8px', padding: '15px', marginBottom: '10px', borderLeft: '4px solid #198754' },
-  sourceRow: { display: 'flex', justifyContent: 'space-between', marginBottom: '5px' },
-  lastRunText: { margin: 0, fontSize: '0.8rem', color: '#6c757d' },
-  statsBar: { display: 'flex', gap: '10px', marginTop: '10px' },
-  statBox: { flex: 1, padding: '10px', borderRadius: '6px', display: 'flex', flexDirection: 'column', alignItems: 'center', boxShadow: '0 2px 4px rgba(0,0,0,0.02)' },
-  fixRow: { display: 'flex', gap: '8px', marginTop: '5px' },
-  fixInput: { flex: 1, padding: '6px 10px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.85rem' },
-  fixBtn: { padding: '6px 14px', backgroundColor: '#198754', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: '600', cursor: 'pointer' },
-  
-  /* --- NEW FEED STATUS FILTER RULES --- */
+  dashboardContainer: { padding: '24px', maxWidth: '1400px', margin: '0 auto', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', backgroundColor: '#f8f9fa', minHeight: '100vh', color: '#212529' },
+  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #dee2e6', paddingBottom: '15px', marginBottom: '25px' },
+  branding: { display: 'flex', flexDirection: 'column' },
+  logoTitle: { margin: 0, fontSize: '1.5rem', fontWeight: 'bold', color: '#1a252f', letterSpacing: '-0.5px' },
+  subLogo: { fontSize: '0.75rem', color: '#6c757d', fontWeight: '500', marginTop: '2px' },
+  nav: { display: 'flex', gap: '8px' },
+  navBtn: { padding: '8px 16px', borderRadius: '6px', border: '1px solid #dee2e6', backgroundColor: '#ffffff', cursor: 'pointer', fontSize: '0.85rem', fontWeight: '600', color: '#495057', transition: 'all 0.15s ease' },
+  activeNavBtn: { padding: '8px 16px', borderRadius: '6px', border: '1px solid #1a252f', backgroundColor: '#1a252f', cursor: 'pointer', fontSize: '0.85rem', fontWeight: '600', color: '#ffffff' },
+  metricsGrid: { display: 'flex', gap: '15px', marginBottom: '25px' },
+  metricCard: { flex: 1, backgroundColor: '#ffffff', borderRadius: '8px', padding: '15px 20px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)', border: '1px solid #e9ecef' },
+  metricTitle: { margin: '0 0 5px 0', fontSize: '0.75rem', fontWeight: '700', color: '#6c757d', textTransform: 'uppercase', letterSpacing: '0.5px' },
+  metricValue: { margin: 0, fontSize: '1.75rem', fontWeight: 'bold' },
+  workspace: { marginTop: '10px' },
+  tableCard: { backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #e9ecef', boxShadow: '0 1px 3px rgba(0,0,0,0.05)', overflow: 'hidden' },
+  table: { width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.85rem' },
+  tableHeaderRow: { backgroundColor: '#f1f3f5', borderBottom: '1px solid #dee2e6' },
+  th: { padding: '12px 16px', fontWeight: '600', color: '#495057' },
+  tableBodyRow: { borderBottom: '1px solid #f1f3f5' },
+  td: { padding: '12px 16px', color: '#495057', verticalAlign: 'middle' },
+  tdTitleColumn: { padding: '12px 16px', color: '#1a252f', fontWeight: '500', width: '45%' },
+  tdCategoryColumn: { padding: '12px 16px', width: '12%' },
+  categoryBadge: { display: 'inline-block', backgroundColor: '#e9ecef', color: '#495057', padding: '3px 8px', borderRadius: '4px', fontSize: '0.75rem', fontWeight: '500' },
+  statusBadge: { display: 'inline-block', padding: '4px 8px', borderRadius: '4px', fontSize: '0.75rem', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.2px' },
+  manualMatchWrapper: { display: 'flex', gap: '6px', alignItems: 'center' },
+  actionColumnWrapper: { 
+    display: 'flex', 
+    alignItems: 'center', 
+    gap: '12px' 
+  },
+  ignoreBtn: { 
+    padding: '5px 10px', 
+    borderRadius: '4px', 
+    border: '1px solid #dc3545', 
+    backgroundColor: '#fff', 
+    color: '#dc3545', 
+    fontSize: '0.8rem', 
+    fontWeight: '600', 
+    cursor: 'pointer',
+    transition: 'all 0.15s ease'
+  },
+  manualInput: { padding: '5px 8px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.8rem', width: '110px', backgroundColor: '#fafafa' },
+  manualSubmitBtn: { padding: '5px 10px', borderRadius: '4px', border: 'none', backgroundColor: '#0d6efd', color: '#fff', fontSize: '0.8rem', fontWeight: '600', cursor: 'pointer' },
+  twoColumnGrid: { display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: '20px' },
+  sectionHeaderTitle: { margin: '0', padding: '16px', borderBottom: '1px solid #f1f3f5', fontSize: '0.95rem', fontWeight: '700', color: '#1a252f' },
+  sourceItemCard: { padding: '15px', borderBottom: '1px solid #f1f3f5', margin: '0 16px 16px 16px', backgroundColor: '#fafafa', borderRadius: '6px', border: '1px solid #e9ecef' },
+  sourceHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' },
+  sourceName: { margin: 0, fontSize: '0.9rem', fontWeight: '700', color: '#212529' },
+  activeSourceBadge: { fontSize: '0.7rem', color: '#155724', backgroundColor: '#d4edda', padding: '2px 6px', borderRadius: '4px', fontWeight: 'bold' },
+  inactiveSourceBadge: { fontSize: '0.7rem', color: '#721c24', backgroundColor: '#f8d7da', padding: '2px 6px', borderRadius: '4px', fontWeight: 'bold' },
+  sourceUrlCode: { display: 'block', fontSize: '0.75rem', color: '#6f42c1', backgroundColor: '#f8f1fa', padding: '6px 10px', borderRadius: '4px', marginBottom: '8px', overflowX: 'auto', whiteSpace: 'nowrap' },
+  sourceMetaText: { margin: 0, fontSize: '0.75rem', color: '#6c757d' },
+  statusToast: { padding: '12px 16px', backgroundColor: '#e2e3e5', color: '#383d41', borderRadius: '6px', fontSize: '0.85rem', fontWeight: '500', marginBottom: '20px', border: '1px solid #d6d8db' },
+  forceSyncBtn: { padding: '10px 20px', backgroundColor: '#198754', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: '600', cursor: 'pointer' },
   filterRow: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '15px', backgroundColor: '#fff', padding: '10px', borderRadius: '8px', border: '1px solid #e9ecef' },
   filterLabel: { fontSize: '0.85rem', fontWeight: 'bold', color: '#495057' },
   filterDropdown: { flex: 1, padding: '6px 10px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.85rem', backgroundColor: '#ffffff', cursor: 'pointer' },
-
-  /* --- NEW FORM DESIGN OBJECT VALUES --- */
-  formCard: { backgroundColor: '#ffffff', borderRadius: '8px', padding: '15px', border: '1px solid #e9ecef' },
+  formCard: { backgroundColor: '#ffffff', borderRadius: '8px', padding: '15px', border: '1px solid #e9ecef', alignSelf: 'start' },
   formLayout: { display: 'flex', flexDirection: 'column', gap: '10px' },
   formInput: { padding: '8px 12px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.85rem' },
   formLabel: { fontSize: '0.75rem', fontWeight: 'bold', color: '#495057', marginTop: '4px' },
-  formTextarea: { padding: '8px 10px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.8rem', fontFamily: 'monospace', backgroundColor: '#f8f9fa' },
-  formBtn: { padding: '10px', backgroundColor: '#198754', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer' },
-  formStatus: { padding: '10px', borderRadius: '4px', fontSize: '0.8rem', textAlign: 'center', fontWeight: '500' }
+  formTextarea: { padding: '8px 12px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.8rem', fontFamily: 'monospace', minHeight: '160px', resize: 'vertical', backgroundColor: '#fafafa' },
+  submitBtn: { padding: '10px', borderRadius: '4px', border: 'none', backgroundColor: '#212529', color: '#fff', fontSize: '0.85rem', fontWeight: '600', cursor: 'pointer', marginTop: '5px' },
+  editFormInlineBtn: { padding: '3px 8px', borderRadius: '4px', border: '1px solid #ced4da', backgroundColor: '#fff', fontSize: '0.75rem', fontWeight: '600', color: '#0d6efd', cursor: 'pointer' },
+  cancelEditBtn: { padding: '4px 10px', borderRadius: '4px', border: '1px solid #dc3545', backgroundColor: '#fff', color: '#dc3545', fontSize: '0.75rem', fontWeight: '600', cursor: 'pointer' },
+  updateSubmitBtn: { padding: '10px', borderRadius: '4px', border: 'none', backgroundColor: '#0d6efd', color: '#fff', fontSize: '0.85rem', fontWeight: '600', cursor: 'pointer', marginTop: '5px' }
 };
 
 export default App;

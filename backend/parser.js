@@ -21,19 +21,37 @@ async function parseXMLFeed(xmlString, mapping) {
 
   // Map the raw XML structures to our unified database schema fields
   return rawItems.map(item => {
-    // Magnet link extraction logic: LimeTorrents puts the magnet/torrent link in the <enclosure url="..."> tag
+    // Magnet link extraction logic: LimeTorrents puts the magnet/torrent link in the <enclosure url=\"...\"> tag
     let magnetLink = '';
     if (item[selectors.magnet_link]) {
       magnetLink = item[selectors.magnet_link].url || item[selectors.magnet_link];
     }
 
+    // --- NEW REGEX DESCRIPTION EXTRACTION LOGIC ---
+    let rawDescription = item[selectors.description] || '';
+    let seedsCount = 0;
+    let leechersCount = 0;
+
+    if (typeof rawDescription === 'string') {
+      // Handles formats like "Seeds: 36" or "Seeds: 0" case-insensitively
+      const seedsMatch = rawDescription.match(/Seeds:\s*(\d+)/i);
+      // Handles formats like "Leechers: 5", "Leechers 5", or "Leechers: 0"
+      const leechersMatch = rawDescription.match(/Leechers(?:\s*:\s*|\s+)(\d+)/i);
+
+      if (seedsMatch) seedsCount = parseInt(seedsMatch[1], 10);
+      if (leechersMatch) leechersCount = parseInt(leechersMatch[1], 10);
+    }
+
+    // Re-build a clean, normalized plain text copy string instead of keeping layout snippets
+    const cleanDescription = `Seeds: ${seedsCount} | Leechers: ${leechersCount}`;
+
     return {
       title: item[selectors.title] || 'Untitled Entry',
       source_link: item[selectors.source_link] || '',
       category: item[selectors.category] || 'Unknown',
-      description: item[selectors.description] || '',
+      description: cleanDescription,
       magnet_link: magnetLink,
-      date_published: item[selectors.date_published] ? new Date(item[selectors.date_published]) : new Date()
+      date_published: item[selectors.date_published] || null
     };
   });
 }

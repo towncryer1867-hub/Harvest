@@ -19,165 +19,146 @@ const pool = new Pool({
 
 const tvdb = new TVDBClient(process.env.TVDB_API_KEY);
 
-// API Route: View the latest items harvested by the engine
-app.get('/api/entries', async (req, res) => {
+
+// =========================================================================
+// LIBRARY API ENDPOINTS FOR THE NEW FRONTEND ARCHITECTURE
+// =========================================================================
+
+// MOVIES: Get all unique movies
+app.get('/api/media/movies', async (req, res) => {
   try {
-    const entries = await pool.query(`
-      SELECT e.id, e.title, e.category, e.date_published, e.match_status, s.name as source_name 
-      FROM scraped_entries e
-      LEFT JOIN  scrape_sources s ON e.source_id = s.id
-      ORDER BY e.date_published DESC 
-      LIMIT 50
-    `);
-    res.json({ count: entries.rowCount, entries: entries.rows });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// API Route: Test live metadata search validation via TheTVDB
-app.get('/api/test-search', async (req, res) => {
-  const testTitle = req.query.q || "The Boys";
-  try {
-    const searchResults = await tvdb.searchMedia(testTitle);
-    res.json({
-      query_processed: testTitle,
-      results_found: searchResults.length,
-      data: searchResults
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message, details: error.response?.data || null });
-  }
-});
-
-// API Health Check Route
-app.get('/api/health', async (req, res) => {
-  try {
-    const dbCheck = await pool.query('SELECT name, last_run_at, interval_minutes FROM scrape_sources');
-    res.json({
-      status: 'Harvest Backend is running',
-      database: 'Connected successfully',
-      sources: dbCheck.rows,
-      timestamp: new Date()
-    });
-  } catch (error) {
-    res.status(500).json({ database: 'Connection failed', error: error.message });
-  }
-});
-
-// API Route: Manually match/override an item link using an explicit TVDB ID
-app.post('/api/manual-match', async (req, res) => {
-  const { entry_id, tvdb_id } = req.body;
-
-  if (!entry_id || !tvdb_id) {
-    return res.status(400).json({ error: "Missing required properties entry_id or tvdb_id" });
-  }
-
-  try {
-    // 1. Fetch details directly from TVDB using the verified ID asset tag
-    const details = await tvdb.getSeriesDetails(tvdb_id);
-    if (!details) {
-      return res.status(404).json({ error: "No series asset found on TVDB with that ID" });
-    }
-
-    // 2. Insert into metadata cache
-    const metaInsert = `
-      INSERT INTO metadata_items (tvdb_id, type, title, overview, poster_path)
-      VALUES ($1, 'series', $2, $3, $4)
-      ON CONFLICT (tvdb_id) DO UPDATE SET title = EXCLUDED.title
-      RETURNING id;
-    `;
-    const metaRes = await pool.query(metaInsert, [
-      tvdb_id,
-      details.name,
-      details.overview || '',
-      details.image || ''
-    ]);
-
-    const metadataItemId = metaRes.rows[0].id;
-
-    // 3. Force-bind the scraped entry item row and mark status complete
-    await pool.query(
-      "UPDATE scraped_entries SET metadata_item_id = $1, match_status = 'matched' WHERE id = $2",
-      [metadataItemId, entry_id]
+    const movies = await pool.query(
+      "SELECT id, title, overview, poster_path, release_date FROM metadata_items WHERE type = 'movie' ORDER BY title ASC"
     );
-
-    res.json({ success: true, message: `Successfully re-bound item to "${details.name}"` });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.json({ movies: movies.rows });
+  } catch (err) {
+    console.error("Error fetching movies:", err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// API Route: Fetch aggregate parsing metrics and failed items for the Admin Queue
-app.get('/api/admin/queue', async (req, res) => {
+// TV: Get all top-level TV shows
+app.get('/api/media/shows', async (req, res) => {
   try {
-    // 1. Get status counts
-    const countsQuery = await pool.query(`
-      SELECT match_status, COUNT(*) as count 
-      FROM scraped_entries 
-      GROUP BY match_status
-    `);
-
-    // 2. Get a list of failed items to display in the fix-it panel
-    const failedItemsQuery = await pool.query(`
-      SELECT id, title, category, date_scraped 
-      FROM scraped_entries 
-      WHERE match_status = 'failed'
-      ORDER BY date_scraped DESC 
-      LIMIT 20
-    `);
-
-    // Format counts into a clean key-value object
-    const stats = { matched: 0, unmatched: 0, failed: 0 };
-    countsQuery.rows.forEach(row => {
-      stats[row.match_status] = parseInt(row.count, 10);
-    });
-
-    res.json({
-      stats,
-      failed_items: failedItemsQuery.rows
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    const shows = await pool.query(
+      "SELECT id, tvdb_id, title, overview, poster_path FROM metadata_shows ORDER BY title ASC"
+    );
+    res.json({ shows: shows.rows });
+  } catch (err) {
+    console.error("Error fetching shows:", err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// API Route: Force ONLY the metadata matcher to re-evaluate pending/failed items
-app.post('/api/admin/force-sync', async (req, res) => {
-  console.log("Admin triggered a metadata-only matching cycle retry...");
+// TV: Get all unique seasons for a specific show (Row 1 Selector)
+app.get('/api/media/shows/:showId/seasons', async (req, res) => {
+  const { showId } = req.params;
   try {
-    // 1. Skip the scraper entirely, go straight to processing the TVDB links
-    await processPendingMatches(pool, tvdb);
-
-    // 2. Grab the updated metrics to refresh the UI dashboard counters
-    const countsQuery = await pool.query(`
-      SELECT match_status, COUNT(*) as count 
-      FROM scraped_entries 
-      GROUP BY match_status
-    `);
-
-    const stats = { matched: 0, unmatched: 0, failed: 0 };
-    countsQuery.rows.forEach(row => {
-      stats[row.match_status] = parseInt(row.count, 10);
-    });
-
-    res.json({ success: true, message: "Metadata matching retry complete.", stats });
-  } catch (error) {
-    console.error("Manual matching retry failed:", error.message);
-    res.status(500).json({ error: error.message });
+    const seasons = await pool.query(
+      "SELECT id, season_number FROM metadata_seasons WHERE show_id = $1 ORDER BY season_number ASC",
+      [parseInt(showId, 10)]
+    );
+    res.json({ seasons: seasons.rows });
+  } catch (err) {
+    console.error("Error fetching seasons:", err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// API Route: Consumer media search engine with advanced filtering options
+// TV: Get all season packs for a show (Row 2 Display)
+app.get('/api/media/shows/:showId/season-packs', async (req, res) => {
+  const { showId } = req.params;
+  try {
+    const packs = await pool.query(
+      `SELECT i.id, i.title, i.overview, s.season_number 
+       FROM metadata_items i
+       JOIN metadata_seasons s ON i.season_id = s.id
+       WHERE i.show_id = $1 AND i.type = 'season_pack'
+       ORDER BY s.season_number ASC`,
+      [parseInt(showId, 10)]
+    );
+    res.json({ season_packs: packs.rows });
+  } catch (err) {
+    console.error("Error fetching season packs:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// TV: Get all episodes for a show (Row 3 Display)
+app.get('/api/media/shows/:showId/episodes', async (req, res) => {
+  const { showId } = req.params;
+  try {
+    const episodes = await pool.query(
+      `SELECT i.id, i.title, i.overview, i.episode_number, i.air_date, s.season_number 
+       FROM metadata_items i
+       JOIN metadata_seasons s ON i.season_id = s.id
+       WHERE i.show_id = $1 AND i.type = 'episode'
+       ORDER BY s.season_number ASC, i.episode_number ASC`,
+      [parseInt(showId, 10)]
+    );
+    res.json({ episodes: episodes.rows });
+  } catch (err) {
+    console.error("Error fetching episodes:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ENTITES: Get raw scraped stream items linked to a specific movie or episode
+app.get('/api/media/items/:itemId/entries', async (req, res) => {
+  const { itemId } = req.params;
+  try {
+    const entries = await pool.query(
+      "SELECT id, title, category, magnet_link, date_scraped FROM scraped_entries WHERE metadata_item_id = $1 ORDER BY date_scraped DESC",
+      [parseInt(itemId, 10)]
+    );
+    res.json({ entries: entries.rows });
+  } catch (err) {
+    console.error("Error fetching item links:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ENTITES: Get raw scraped stream items linked to an entire Season Pack container
+app.get('/api/media/shows/:showId/seasons/:seasonNumber/pack-entries', async (req, res) => {
+  const { showId, seasonNumber } = req.params;
+  try {
+    // Looks up entries attached to the 'season_pack' row for that precise show season
+    const entries = await pool.query(
+      `SELECT e.id, e.title, e.category, e.magnet_link, e.date_scraped 
+       FROM scraped_entries e
+       JOIN metadata_items i ON e.metadata_item_id = i.id
+       JOIN metadata_seasons s ON i.season_id = s.id
+       WHERE i.show_id = $1 AND s.season_number = $2 AND i.type = 'season_pack'`,
+      [parseInt(showId, 10), parseInt(seasonNumber, 10)]
+    );
+    res.json({ entries: entries.rows });
+  } catch (err) {
+    console.error("Error fetching pack links:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+/// OLD ENTRIES... are these still needed or have they been replaced
+/// OLD ENTRIES.Start
+
+// API Route: Advanced Catalog Search (Queries against Shows & Movie items)
 app.get('/api/media/search', async (req, res) => {
   const { query, type, year, hours } = req.query;
   
   let sql = `
-    SELECT mi.id, mi.tvdb_id, mi.type, mi.title, mi.overview, mi.poster_path, mi.release_date,
-           COUNT(me.id) as episode_count,
-           MAX(se.date_scraped) as latest_arrival
+    SELECT 
+      COALESCE(ms.id, mi.id) as id,
+      mi.tvdb_id, 
+      mi.type, 
+      COALESCE(ms.title, mi.title) as title, 
+      COALESCE(ms.overview, mi.overview) as overview, 
+      ms.poster_path as poster_path,
+      mi.release_date,
+      COUNT(DISTINCT CASE WHEN mi.type = 'episode' THEN mi.id END) as episode_count,
+      MAX(se.date_scraped) as latest_arrival
     FROM metadata_items mi
-    LEFT JOIN metadata_episodes me ON mi.id = me.metadata_item_id
+    LEFT JOIN metadata_shows ms ON mi.show_id = ms.id
     LEFT JOIN scraped_entries se ON mi.id = se.metadata_item_id
     WHERE 1=1
   `;
@@ -185,7 +166,7 @@ app.get('/api/media/search', async (req, res) => {
 
   if (query) {
     params.push(`%${query}%`);
-    sql += ` AND mi.title ILIKE $${params.length}`;
+    sql += ` AND (ms.title ILIKE $${params.length} OR mi.title ILIKE $${params.length})`;
   }
 
   if (type && type !== 'all') {
@@ -198,124 +179,77 @@ app.get('/api/media/search', async (req, res) => {
     sql += ` AND mi.release_date LIKE $${params.length}`;
   }
 
-  // Safely inject hours parameter to prevent raw syntax string truncation
   if (hours && !isNaN(hours)) {
     params.push(`${parseInt(hours, 10)} hours`);
     sql += ` AND se.date_scraped >= NOW() - CAST($${params.length} AS INTERVAL)`;
   }
 
-  sql += ` GROUP BY mi.id ORDER BY latest_arrival DESC`;
+  // FIXED: Adjusted GROUP BY references to prevent positional syntax exceptions
+  sql += ` GROUP BY ms.id, mi.id, mi.tvdb_id, mi.type, mi.title, mi.overview, ms.poster_path, mi.release_date ORDER BY latest_arrival DESC`;
 
   try {
     const results = await pool.query(sql, params);
     res.json({ count: results.rowCount, media: results.rows });
   } catch (error) {
-    console.error("Search API Error:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
-// API Route: Retrieve all episodes for a specific TV series
+// API Route: Retrieve all targeting units (episodes/packs) for a TV series container
 app.get('/api/media/series/:id/episodes', async (req, res) => {
-  const { id } = req.params;
-  
+  const { id } = req.params; // This matches the metadata_shows.id returned from search
   try {
     const query = `
-      SELECT id, season_number, episode_number, title, overview, air_date, is_season_pack
-      FROM metadata_episodes
-      WHERE metadata_item_id = $1
-      ORDER BY season_number ASC, episode_number ASC
+      SELECT 
+        mi.id, 
+        ms.season_number, 
+        COALESCE(mi.episode_number, 0) as episode_number, 
+        mi.title, 
+        mi.overview, 
+        mi.air_date,
+        CASE WHEN mi.type = 'season_pack' THEN true ELSE false END as is_season_pack
+      FROM metadata_items mi
+      JOIN metadata_seasons ms ON mi.season_id = ms.id
+      WHERE mi.show_id = $1
+      ORDER BY ms.season_number ASC, mi.episode_number ASC NULLS FIRST
     `;
     const results = await pool.query(query, [parseInt(id, 10)]);
     res.json({ count: results.rowCount, episodes: results.rows });
   } catch (error) {
-    console.error("Failed to fetch series episodes:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
-// API Route: Retrieve all raw scraped releases matching a specific episode ID
+// API Route: Clean Direct Grab for Target Episodes
 app.get('/api/media/episodes/:id/entries', async (req, res) => {
-  const { id } = req.params;
-  
+  const { id } = req.params; // Direct metadata_items.id reference from row selection
   try {
     const query = `
-      WITH target_ep AS (
-        SELECT metadata_item_id, season_number, episode_number, is_season_pack 
-        FROM metadata_episodes 
-        WHERE id = $1
-      )
-      SELECT 
-        se.id, 
-        se.title, 
-        se.category, 
-        -- Select both possible naming variations safely so frontend never breaks
-        COALESCE(se.date_scraped, se.date_published) AS date_scraped, 
-        se.is_season_pack 
-      FROM scraped_entries se
-      CROSS JOIN target_ep te
-      WHERE se.metadata_item_id = te.metadata_item_id
-        AND (
-          (
-            COALESCE(te.is_season_pack, false) = false
-            AND (
-              se.title ILIKE CONCAT('%S', LPAD(te.season_number::text, 2, '0'), 'E', LPAD(te.episode_number::text, 2, '0'), '%')
-              OR se.title ILIKE CONCAT('%S', te.season_number::text, 'E', te.episode_number::text, '%')
-              OR se.title ILIKE CONCAT('%', te.season_number::text, 'x', LPAD(te.episode_number::text, 2, '0'), '%')
-            )
-          )
-        )
+      SELECT id, title, category, COALESCE(date_scraped, date_published) AS date_scraped, is_season_pack 
+      FROM scraped_entries 
+      WHERE metadata_item_id = $1
       ORDER BY date_scraped DESC;
     `;
-    
     const results = await pool.query(query, [parseInt(id, 10)]);
     res.json({ count: results.rowCount, entries: results.rows });
   } catch (error) {
-    console.error("Failed to fetch raw entries for episode:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
-// API Route: Retrieve all raw scraped season packs matching a specific show ID
+// API Route: Clean Direct Grab for Target Season Packs
 app.get('/api/media/episodes/:id/packentries', async (req, res) => {
-  const { id } = req.params;
-  
+  const { id } = req.params; // Direct metadata_items.id reference from pack row selection
   try {
     const query = `
-      WITH target_ep AS (
-        SELECT metadata_item_id, season_number, is_season_pack 
-        FROM metadata_episodes 
-        WHERE id = $1
-      )
-      SELECT 
-        se.id, 
-        se.title, 
-        se.category, 
-        -- Select both possible naming variations safely so frontend never breaks
-        COALESCE(se.date_scraped, se.date_published) AS date_scraped, 
-        se.is_season_pack 
-      FROM scraped_entries se
-      CROSS JOIN target_ep te
-      WHERE se.metadata_item_id = te.metadata_item_id
-        AND (
-          (
-            te.is_season_pack = true
-            AND se.is_season_pack = true
-            -- Matches any variation containing S04 or Season 4
-            AND (
-              se.title ILIKE CONCAT('%S', LPAD(te.season_number::text, 2, '0'), '%')
-              OR se.title ILIKE CONCAT('%S', te.season_number::text, '%')
-              OR se.title ILIKE CONCAT('%Season%', te.season_number::text, '%')
-            )
-          )
-        )
+      SELECT id, title, category, COALESCE(date_scraped, date_published) AS date_scraped, is_season_pack 
+      FROM scraped_entries 
+      WHERE metadata_item_id = $1
       ORDER BY date_scraped DESC;
     `;
-    
     const results = await pool.query(query, [parseInt(id, 10)]);
     res.json({ count: results.rowCount, entries: results.rows });
   } catch (error) {
-    console.error("Failed to fetch raw entries for episode:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -323,50 +257,200 @@ app.get('/api/media/episodes/:id/packentries', async (req, res) => {
 
 
 
+// API Route: View raw unmatched or general feed logs
+app.get('/api/entries', async (req, res) => {
+  try {
+    const entries = await pool.query(`
+      SELECT e.id, e.title, e.category, e.date_published, e.match_status, s.name as source_name 
+      FROM scraped_entries e
+      LEFT JOIN scrape_sources s ON e.source_id = s.id
+      ORDER BY e.date_published DESC 
+      LIMIT 50
+    `);
+    res.json({ count: entries.rowCount, entries: entries.rows });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-// Admin API: Create a new scraping source configuration live
-app.post('/api/admin/sources', async (req, res) => {
-  const { name, url, interval_minutes, config } = req.body;
+// Manual Match Override Endpoint
+app.post('/api/manual-match', async (req, res) => {
+  const { entry_id, tvdb_id } = req.body;
+  if (!entry_id || !tvdb_id) return res.status(400).json({ error: "Missing properties" });
 
-  // Basic validation to catch issues before hitting the DB
+  try {
+    const details = await tvdb.getSeriesDetails(tvdb_id);
+    if (!details) return res.status(404).json({ error: "No series found" });
+
+    const showRow = await pool.query(`
+      INSERT INTO metadata_shows (tvdb_id, title, overview, poster_path)
+      VALUES ($1, $2, $3, $4) ON CONFLICT (tvdb_id) DO UPDATE SET title = EXCLUDED.title RETURNING id
+    `, [tvdb_id, details.name, details.overview || '', details.image || '']);
+    
+    // Create an explicit structural placeholder pack item for manual fallback allocations
+    const seasonRow = await pool.query(`
+      INSERT INTO metadata_seasons (show_id, season_number, title)
+      VALUES ($1, 1, 'Season 1') ON CONFLICT (show_id, season_number) DO UPDATE SET title = EXCLUDED.title RETURNING id
+    `, [showRow.rows[0].id]);
+
+    const itemRow = await pool.query(`
+      INSERT INTO metadata_items (type, show_id, season_id, title, overview)
+      VALUES ('season_pack', $1, $2, $3, $4) RETURNING id
+    `, [showRow.rows[0].id, seasonRow.rows[0].id, `${details.name} - Manual Override Pack`, 'Manually linked resource listing']);
+
+    await pool.query("UPDATE scraped_entries SET metadata_item_id = $1, match_status = 'matched' WHERE id = $2", [itemRow.rows[0].id, entry_id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+/// OLD ENTRIES.END
+
+
+
+// =========================================================================
+// ADMIN API ENDPOINTS
+// =========================================================================
+
+// API Route: SELECT all tracking scrape sources for the administration panels
+app.get('/api/admin/sources', async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT id, name, url, interval_minutes, is_active, last_run_at, created_at FROM scrape_sources ORDER BY id ASC"
+    );
+    res.json({ count: result.rowCount, sources: result.rows });
+  } catch (error) {
+    console.error("Failed to query scrape sources list:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// API Route: SELECT Dashboard Metrics
+app.get('/api/admin/queue', async (req, res) => {
+  try {
+    const countsQuery = await pool.query(`
+      SELECT match_status, COUNT(*) as count FROM scraped_entries GROUP BY match_status
+    `);
+    const failedItemsQuery = await pool.query(`
+      SELECT id, title, category, date_scraped FROM scraped_entries WHERE match_status = 'failed' ORDER BY date_scraped DESC LIMIT 20
+    `);
+
+    const stats = { matched: 0, unmatched: 0, failed: 0, ignored: 0 };
+    countsQuery.rows.forEach(row => { stats[row.match_status] = parseInt(row.count, 10); });
+
+    res.json({ stats, failed_items: failedItemsQuery.rows });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// API Route: Force Engine Pipeline Sync
+// NEED BETTER DESCRIPTION FOR THIS
+app.post('/api/admin/force-sync', async (req, res) => {
+  try {
+    await processPendingMatches(pool, tvdb);
+    const countsQuery = await pool.query(`SELECT match_status, COUNT(*) as count FROM scraped_entries GROUP BY match_status`);
+    const stats = { matched: 0, unmatched: 0, failed: 0, ignored: 0 };
+    countsQuery.rows.forEach(row => { stats[row.match_status] = parseInt(row.count, 10); });
+    res.json({ success: true, message: "Metadata matching retry complete.", stats });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// API Route: UPDATE Entry as ignored so metadata parsing bypasses it
+app.post('/api/admin/entries/:id/ignore', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const result = await pool.query(
+      "UPDATE scraped_entries SET match_status = 'ignored' WHERE id = $1 RETURNING id, title",
+      [parseInt(id, 10)]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Scraped entry item not found." });
+    }
+
+    res.json({
+      success: true,
+      message: `Successfully ignored entry: ${result.rows[0].title}`,
+      id: result.rows[0].id
+    });
+  } catch (error) {
+    console.error("Failed to flag entry as ignored:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// API Route: UPDATE an existing scraping source configuration
+app.put('/api/admin/sources/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name, url, interval_minutes, config, is_active } = req.body;
+
   if (!name || !url || !interval_minutes || !config) {
-    return res.status(400).json({ error: "All parameters (name, url, interval_minutes, config) are required." });
+    return res.status(400).json({ error: "Name, url, interval_minutes, and config parameters are all required." });
   }
 
   try {
     const query = `
-      INSERT INTO scrape_sources (name, url, interval_minutes, config_mapping)
-      VALUES ($1, $2, $3, $4::jsonb)
+      UPDATE scrape_sources 
+      SET 
+        name = $1, 
+        url = $2, 
+        interval_minutes = $3, 
+        config_mapping = $4::jsonb,
+        is_active = $5
+      WHERE id = $6
       RETURNING id, name;
     `;
     
-    // We pass the JSON config object through JSON.stringify so Postgres treats it as valid JSONB text
-    const result = await pool.query(query, [name, url, interval_minutes, JSON.stringify(config)]);
+    const result = await pool.query(query, [
+      name, 
+      url, 
+      parseInt(interval_minutes, 10), 
+      JSON.stringify(config), 
+      is_active !== undefined ? is_active : true,
+      parseInt(id, 10)
+    ]);
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Scraping source tracking entry not found." });
+    }
     
-    res.status(201).json({ 
+    res.json({ 
       success: true, 
-      message: "Scraping source deployed live!",
-      id: result.rows[0].id,
-      name: result.rows[0].name
+      message: "Source configuration successfully updated live.", 
+      id: result.rows[0].id, 
+      name: result.rows[0].name 
     });
   } catch (error) {
-    console.error("Failed to insert live scraping source:", error.message);
+    console.error("Failed to update scraping source:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// API Route: INSRT INTO scraping source with new configuration
+app.post('/api/admin/sources', async (req, res) => {
+  const { name, url, interval_minutes, config } = req.body;
+  try {
+    const result = await pool.query(
+      `INSERT INTO scrape_sources (name, url, interval_minutes, config_mapping) VALUES ($1, $2, $3, $4::jsonb) RETURNING id, name`,
+      [name, url, interval_minutes, JSON.stringify(config)]
+    );
+    res.status(201).json({ success: true, id: result.rows[0].id, name: result.rows[0].name });
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
 
 
-// API Listener: Run initial scrape and process + check back every 5 min to ensure data is up-to-date
+
 app.listen(port, async () => {
   console.log(`Harvest Backend listening at http://localhost:${port}`);
-  
-  // Trigger a baseline scrape instantly on startup so we don't have to wait for timers
-  console.log("Bootstrapping initial scraper run...");
   await runScraper(pool);
   await processPendingMatches(pool, tvdb);
-
-  // Poll for pipeline updates periodically every 5 minutes
   setInterval(async () => {
     await runScraper(pool);
     await processPendingMatches(pool, tvdb);

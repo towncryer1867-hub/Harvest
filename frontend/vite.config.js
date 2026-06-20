@@ -10,9 +10,9 @@ export default defineConfig({
     watch: {
       usePolling: true
     },
-    // Proxy configuration routes backend queries to the correct Node container pipeline
+    // Only proxy backend API routes (/api/...), not frontend modules like apiClient.js
     proxy: {
-      '/api': {
+      '/api/': {
         target: 'http://backend:5000',
         changeOrigin: true,
       }

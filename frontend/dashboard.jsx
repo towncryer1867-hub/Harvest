@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { fetchJson } from './api'
+import { fetchJson } from './apiClient'
 
 function App() {
   const [entries, setEntries] = useState([]);

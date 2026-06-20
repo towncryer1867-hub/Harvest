@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import ReactDOM from 'react-dom/client'
 import AdminDashboard from './dashboard'
-import { fetchJson } from './api'
+import { fetchJson } from './apiClient'
 import { readNavigation, writeNavigation, migrateLegacyNavigation } from './navigation'
 
 // Component to handle expanding any metadata item (movie, episode, season pack) to see raw scraped torrent links

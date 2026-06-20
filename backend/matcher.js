@@ -51,7 +51,7 @@ async function processPendingMatches(pool, tvdb) {
             rootAsset.tvdb_id,
             rootAsset.name,
             rootAsset.overview || '',
-            rootAsset.image_url || ''
+            tvdb.normalizeImageUrl(rootAsset.image_url)
           ]);
           const showId = showRow.rows[0].id;
 
@@ -144,19 +144,46 @@ async function processPendingMatches(pool, tvdb) {
         else if (parsed.type === 'movie') {
           console.log(`Found Movie: "${rootAsset.name}" (TVDB Year: ${rootAsset.year})`);
 
-          const movieQuery = `
-            INSERT INTO metadata_items (type, tvdb_id, title, overview, release_date)
-            VALUES ('movie', $1, $2, $3, $4)
-            ON CONFLICT (tvdb_id) DO UPDATE SET title = EXCLUDED.title
+          const movieDetails = await tvdb.getMovieDetails(rootAsset.tvdb_id);
+          const overview = movieDetails?.overview || rootAsset.overview || '';
+          const posterPath = tvdb.normalizeImageUrl(
+            movieDetails?.image || rootAsset.image_url
+          );
+          const releaseDate = String(movieDetails?.year || rootAsset.year || parsed.year || '');
+
+          const movieProfileQuery = `
+            INSERT INTO metadata_movies (tvdb_id, title, overview, poster_path, release_date)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (tvdb_id) DO UPDATE SET
+              title = EXCLUDED.title,
+              overview = COALESCE(NULLIF(EXCLUDED.overview, ''), metadata_movies.overview),
+              poster_path = COALESCE(NULLIF(EXCLUDED.poster_path, ''), metadata_movies.poster_path),
+              release_date = COALESCE(NULLIF(EXCLUDED.release_date, ''), metadata_movies.release_date)
             RETURNING id;
           `;
-          const movieRow = await pool.query(movieQuery, [
+          const movieProfileRow = await pool.query(movieProfileQuery, [
             rootAsset.tvdb_id,
             rootAsset.name,
-            rootAsset.overview || '',
-            rootAsset.year || parsed.year
+            overview,
+            posterPath,
+            releaseDate
           ]);
-          finalMetadataId = movieRow.rows[0].id;
+          const movieId = movieProfileRow.rows[0].id;
+
+          const itemQuery = `
+            INSERT INTO metadata_items (type, movie_id, title, overview)
+            VALUES ('movie', $1, $2, $3)
+            ON CONFLICT (movie_id) DO UPDATE SET
+              title = EXCLUDED.title,
+              overview = COALESCE(NULLIF(EXCLUDED.overview, ''), metadata_items.overview)
+            RETURNING id;
+          `;
+          const itemRow = await pool.query(itemQuery, [
+            movieId,
+            rootAsset.name,
+            overview
+          ]);
+          finalMetadataId = itemRow.rows[0].id;
         }
 
         if (finalMetadataId) {

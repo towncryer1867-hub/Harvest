@@ -1,11 +1,14 @@
 import React, { useState, useEffect } from 'react'
 import ReactDOM from 'react-dom/client'
 import AdminDashboard from './dashboard'
+import { fetchJson } from './api'
+import { readNavigation, writeNavigation, migrateLegacyNavigation } from './navigation'
 
 // Component to handle expanding any metadata item (movie, episode, season pack) to see raw scraped torrent links
-function ScrapedEntriesDropdown({ itemId, isSeasonPack = false, seasonNumber = null, showId = null }) {
+function ScrapedEntriesDropdown({ itemId, movieId = null, isSeasonPack = false, seasonNumber = null, showId = null }) {
   const [expanded, setExpanded] = useState(false);
   const [entries, setEntries] = useState([]);
+  const [fetchError, setFetchError] = useState(null);
   const [loading, setLoading] = useState(false);
 
   const toggleExpand = async () => {
@@ -14,15 +17,18 @@ function ScrapedEntriesDropdown({ itemId, isSeasonPack = false, seasonNumber = n
         setLoading(true);
         // Build endpoint based on item type properties
         let url = `/api/media/items/${itemId}/entries`;
-        if (isSeasonPack) {
+        if (movieId) {
+          url = `/api/media/movies/${movieId}/entries`;
+        } else if (isSeasonPack) {
           url = `/api/media/shows/${showId}/seasons/${seasonNumber}/pack-entries`;
         }
         
-        const res = await fetch(url);
-        const data = await res.json();
+        const data = await fetchJson(url);
         setEntries(data.entries || []);
+        setFetchError(null);
       } catch (e) {
         console.error("Error fetching linked raw streams:", e);
+        setFetchError(e.message);
       } finally {
         setLoading(false);
       }
@@ -40,6 +46,8 @@ function ScrapedEntriesDropdown({ itemId, isSeasonPack = false, seasonNumber = n
         <div style={styles.entriesPanel}>
           {loading ? (
             <div style={styles.subText}>Querying ingestion archives...</div>
+          ) : fetchError ? (
+            <div style={styles.errorText}>{fetchError}</div>
           ) : entries.length === 0 ? (
             <div style={styles.subText}>No active scraped records attached to this item context.</div>
           ) : (
@@ -63,98 +71,191 @@ function ScrapedEntriesDropdown({ itemId, isSeasonPack = false, seasonNumber = n
 }
 
 function App() {
-  const [view, setView] = useState(() => {
-    return localStorage.getItem('harvest_current_view') || 'library';  // 'library', 'movie-detail', 'show-detail', 'admin'
-  });
-  
-  const navigateToView = (targetView) => {
-    setView(targetView);
-    localStorage.setItem('harvest_current_view', targetView);
-  };
+  const [view, setView] = useState('library');
+  const [mediaType, setMediaType] = useState('series');
+  const [restoring, setRestoring] = useState(true);
 
-  const [mediaType, setMediaType] = useState('series'); // Toggle between top-level 'series' or 'movie'
-  
-  // Data collections
   const [movies, setMovies] = useState([]);
   const [shows, setShows] = useState([]);
   const [selectedMovie, setSelectedMovie] = useState(null);
   const [selectedShow, setSelectedShow] = useState(null);
-  
-  // TV View Hierarchy Filter States
+
   const [showSeasons, setShowSeasons] = useState([]);
   const [showEpisodes, setShowEpisodes] = useState([]);
   const [showSeasonPacks, setShowSeasonPacks] = useState([]);
   const [activeSeasonFilter, setActiveSeasonFilter] = useState(null);
+  const [libraryError, setLibraryError] = useState(null);
+  const [showDetailError, setShowDetailError] = useState(null);
 
-  useEffect(() => {
-    loadTopLevelLibrary();
-  }, []);
+  const goToLibrary = () => {
+    writeNavigation({
+      view: 'library',
+      movieId: null,
+      showId: null,
+      activeSeasonFilter: null,
+    });
+    setView('library');
+    setSelectedMovie(null);
+    setSelectedShow(null);
+    setShowSeasons([]);
+    setShowEpisodes([]);
+    setShowSeasonPacks([]);
+    setActiveSeasonFilter(null);
+    setShowDetailError(null);
+  };
+
+  const goToAdmin = () => {
+    writeNavigation({
+      view: 'admin',
+      movieId: null,
+      showId: null,
+      activeSeasonFilter: null,
+    });
+    setView('admin');
+    setSelectedMovie(null);
+    setSelectedShow(null);
+  };
+
+  const setLibraryMediaType = (type) => {
+    setMediaType(type);
+    writeNavigation({ mediaType: type });
+  };
 
   const loadTopLevelLibrary = async () => {
     try {
-      const [resMovies, resShows] = await Promise.all([
-        fetch('/api/media/movies'),
-        fetch('/api/media/shows')
+      setLibraryError(null);
+      const [dataMovies, dataShows] = await Promise.all([
+        fetchJson('/api/media/movies'),
+        fetchJson('/api/media/shows')
       ]);
-      const dataMovies = await resMovies.json();
-      const dataShows = await resShows.json();
-      
-      setMovies(dataMovies.movies || []);
-      setShows(dataShows.shows || []);
+      const movieList = dataMovies.movies || [];
+      const showList = dataShows.shows || [];
+      setMovies(movieList);
+      setShows(showList);
+      return { movies: movieList, shows: showList };
     } catch (err) {
       console.error("Error loading library metrics:", err);
+      setLibraryError(err.message);
+      return { movies: [], shows: [] };
     }
   };
 
-  const handleSelectMovie = async (movie) => {
+  const loadShowDetail = async (show, preferredSeason = null) => {
+    setSelectedShow(show);
+    setShowDetailError(null);
+    const [seasonsData, epData, packsData] = await Promise.all([
+      fetchJson(`/api/media/shows/${show.id}/seasons`),
+      fetchJson(`/api/media/shows/${show.id}/episodes`),
+      fetchJson(`/api/media/shows/${show.id}/season-packs`)
+    ]);
+
+    const sortedSeasons = seasonsData.seasons || [];
+    setShowSeasons(sortedSeasons);
+    setShowEpisodes(epData.episodes || []);
+    setShowSeasonPacks(packsData.season_packs || []);
+
+    const seasonNumbers = sortedSeasons.map(s => s.season_number);
+    const restoredSeason = preferredSeason != null && seasonNumbers.includes(preferredSeason)
+      ? preferredSeason
+      : (sortedSeasons.length > 0 ? sortedSeasons[0].season_number : null);
+
+    setActiveSeasonFilter(restoredSeason);
+    writeNavigation({
+      view: 'show-detail',
+      showId: show.id,
+      movieId: null,
+      activeSeasonFilter: restoredSeason,
+    });
+    setView('show-detail');
+  };
+
+  useEffect(() => {
+    migrateLegacyNavigation();
+
+    (async () => {
+      const nav = readNavigation();
+      setMediaType(nav.mediaType);
+
+      const { movies: movieList, shows: showList } = await loadTopLevelLibrary();
+
+      try {
+        if (nav.view === 'movie-detail' && nav.movieId) {
+          const movie = movieList.find(m => m.id === nav.movieId);
+          if (movie) {
+            setSelectedMovie(movie);
+            setView('movie-detail');
+            return;
+          }
+        }
+
+        if (nav.view === 'show-detail' && nav.showId) {
+          const show = showList.find(s => s.id === nav.showId);
+          if (show) {
+            await loadShowDetail(show, nav.activeSeasonFilter);
+            return;
+          }
+        }
+
+        if (nav.view === 'admin') {
+          setView('admin');
+          return;
+        }
+
+        setView('library');
+      } catch (err) {
+        console.error("Error restoring navigation state:", err);
+        goToLibrary();
+      } finally {
+        setRestoring(false);
+      }
+    })();
+  }, []);
+
+  const handleSelectMovie = (movie) => {
     setSelectedMovie(movie);
+    writeNavigation({
+      view: 'movie-detail',
+      movieId: movie.id,
+      showId: null,
+      activeSeasonFilter: null,
+    });
     setView('movie-detail');
   };
 
   const handleSelectShow = async (show) => {
     try {
-      setSelectedShow(show);
-      // Fetch structural sub-elements for the selected Show
-      const [resSeasons, resEp, resPacks] = await Promise.all([
-        fetch(`/api/media/shows/${show.id}/seasons`),
-        fetch(`/api/media/shows/${show.id}/episodes`),
-        fetch(`/api/media/shows/${show.id}/season-packs`)
-      ]);
-      
-      const seasonsData = await resSeasons.json();
-      const epData = await resEp.json();
-      const packsData = await resPacks.json();
-
-      const sortedSeasons = seasonsData.seasons || [];
-      setShowSeasons(sortedSeasons);
-      setShowEpisodes(epData.episodes || []);
-      setShowSeasonPacks(packsData.season_packs || []);
-      
-      // Auto-select the first available season sequence index as filter default
-      if (sortedSeasons.length > 0) {
-        setActiveSeasonFilter(sortedSeasons[0].season_number);
-      } else {
-        setActiveSeasonFilter(null);
-      }
-      
-      setView('show-detail');
+      await loadShowDetail(show);
     } catch (err) {
       console.error("Error building hierarchy context:", err);
+      setShowDetailError(err.message);
     }
   };
+
+  const handleSeasonFilterChange = (seasonNumber) => {
+    setActiveSeasonFilter(seasonNumber);
+    writeNavigation({ activeSeasonFilter: seasonNumber });
+  };
+
+  if (restoring) {
+    return (
+      <div style={{ padding: '40px', textAlign: 'center', fontFamily: 'sans-serif', color: '#666' }}>
+        Loading catalog...
+      </div>
+    );
+  }
 
   return (
     <div style={styles.appContainer}>
       {/* Universal Control Dashboard Navbar */}
       <header style={styles.navbar}>
-        <h2 style={styles.brandTitle} onClick={() => { setView('library'); loadTopLevelLibrary(); }}>
+        <h2 style={styles.brandTitle} onClick={() => { goToLibrary(); loadTopLevelLibrary(); }}>
           Harvest Media Catalog
         </h2>
         <div style={{ display: 'flex', gap: '10px' }}>
-        <button style={view !== 'admin' ? styles.navActiveBtn : styles.navBtn} onClick={() => { navigateToView('library'); loadTopLevelLibrary(); }}>
+        <button style={view !== 'admin' ? styles.navActiveBtn : styles.navBtn} onClick={() => { goToLibrary(); loadTopLevelLibrary(); }}>
             Library Deck
         </button>
-        <button style={view === 'admin' ? styles.navActiveBtn : styles.navBtn} onClick={() => navigateToView('admin')}>
+        <button style={view === 'admin' ? styles.navActiveBtn : styles.navBtn} onClick={goToAdmin}>
           Admin Controls
         </button>
         </div>
@@ -163,16 +264,17 @@ function App() {
       {/* VIEW A: MAIN GRID LIBRARY DECK */}
       {view === 'library' && (
         <div>
+          {libraryError && <div style={styles.errorBanner}>{libraryError}</div>}
           <div style={styles.typeToggleBar}>
             <button 
               style={mediaType === 'series' ? styles.toggleActive : styles.toggleInactive} 
-              onClick={() => setMediaType('series')}
+              onClick={() => setLibraryMediaType('series')}
             >
               TV Shows ({shows.length})
             </button>
             <button 
               style={mediaType === 'movie' ? styles.toggleActive : styles.toggleInactive} 
-              onClick={() => setMediaType('movie')}
+              onClick={() => setLibraryMediaType('movie')}
             >
               Movies ({movies.length})
             </button>
@@ -207,7 +309,7 @@ function App() {
       {/* VIEW B: UNIQUE MOVIE EXTENDED PROFILE VIEW */}
       {view === 'movie-detail' && selectedMovie && (
         <div style={styles.detailContainer}>
-          <button style={styles.backBtn} onClick={() => setView('library')}>← Back to Library</button>
+          <button style={styles.backBtn} onClick={goToLibrary}>← Back to Library</button>
           <div style={styles.heroRow}>
             <img src={selectedMovie.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={selectedMovie.title} style={styles.largePoster} />
             <div style={styles.heroMeta}>
@@ -218,7 +320,7 @@ function App() {
               <div style={styles.ingestionBox}>
                 <h3 style={styles.sectionHeading}>Linked Index Entries</h3>
                 <p style={styles.subText}>Scraped targets bound to this unique movie profile:</p>
-                <ScrapedEntriesDropdown itemId={selectedMovie.id} />
+                <ScrapedEntriesDropdown movieId={selectedMovie.id} />
               </div>
             </div>
           </div>
@@ -228,7 +330,8 @@ function App() {
       {/* VIEW C: COMPLEX TV SHOW HIERARCHY FILTER SYSTEM */}
       {view === 'show-detail' && selectedShow && (
         <div style={styles.detailContainer}>
-          <button style={styles.backBtn} onClick={() => setView('library')}>← Back to Library</button>
+          <button style={styles.backBtn} onClick={goToLibrary}>← Back to Library</button>
+          {showDetailError && <div style={styles.errorBanner}>{showDetailError}</div>}
           
           <div style={styles.heroRow}>
             <img src={selectedShow.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={selectedShow.title} style={styles.largePoster} />
@@ -246,7 +349,7 @@ function App() {
                 <button 
                   key={s.id} 
                   style={activeSeasonFilter === s.season_number ? styles.seasonSelectBtnActive : styles.seasonSelectBtn}
-                  onClick={() => setActiveSeasonFilter(s.season_number)}
+                  onClick={() => handleSeasonFilterChange(s.season_number)}
                 >
                   Season {s.season_number}
                 </button>
@@ -358,6 +461,8 @@ const styles = {
   expandBtn: { padding: '6px 12px', border: '1px solid #ced4da', borderRadius: '4px', backgroundColor: '#fff', fontSize: '0.75rem', fontWeight: '600', color: '#495057', cursor: 'pointer' },
   entriesPanel: { marginTop: '10px', backgroundColor: '#fff', border: '1px solid #e9ecef', borderRadius: '4px', padding: '12px' },
   subText: { fontSize: '0.75rem', color: '#6c757d' },
+  errorText: { fontSize: '0.75rem', color: '#dc3545' },
+  errorBanner: { padding: '12px 16px', marginBottom: '16px', backgroundColor: '#f8d7da', color: '#842029', borderRadius: '6px', border: '1px solid #f5c2c7', fontSize: '0.85rem' },
   rawList: { listStyleType: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '10px' },
   rawItem: { paddingBottom: '10px', borderBottom: '1px solid #f1f3f5', lastChild: { borderBottom: 'none' } },
   entryTitle: { fontSize: '0.8rem', color: '#212529', display: 'block', marginBottom: '4px' },

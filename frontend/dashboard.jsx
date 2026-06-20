@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { fetchJson } from './api'
 
 function App() {
   const [entries, setEntries] = useState([]);
@@ -30,6 +31,7 @@ function App() {
     }, null, 2)
   );
   const [statusMessage, setStatusMessage] = useState('');
+  const [fetchError, setFetchError] = useState(null);
 
   useEffect(() => {
     fetchData();
@@ -38,34 +40,19 @@ function App() {
   const fetchData = async () => {
     try {
       setLoading(true);
-      const [resEntries, resSources, resAdmin] = await Promise.all([
-        fetch('/api/entries'),
-        fetch('/api/admin/queue'), // Using existing endpoint metadata shapes
-        fetch('/api/admin/queue')
+      setFetchError(null);
+      const [dataEntries, dataSources, dataAdmin] = await Promise.all([
+        fetchJson('/api/entries'),
+        fetchJson('/api/admin/sources'),
+        fetchJson('/api/admin/queue')
       ]);
-
-      const dataEntries = await resEntries.json();
-      const dataAdmin = await resAdmin.json();
 
       setEntries(dataEntries.entries || []);
+      setSources(dataSources.sources || []);
       setAdminData(dataAdmin);
-      
-      // Temporary array hydration layer matching data context expectations
-      setSources([
-        { 
-          id: 1, 
-          name: 'LimeTorrents - TV: Upload', 
-          url: 'https://www.limetorrents.fun/searchrss/Upload/', 
-          interval_minutes: 30, 
-          is_active: true,
-          config_mapping: {
-            parser: "xml",
-            selectors: { item: "item", title: "title", source_link: "link", date_published: "pubDate", category: "category", description: "description", magnet_link: "enclosure" }
-          }
-        }
-      ]);
     } catch (err) {
       console.error("Error gathering system dashboard metrics:", err);
+      setFetchError(err.message);
     } finally {
       setLoading(false);
     }
@@ -116,21 +103,16 @@ function App() {
       const endpoint = editingSourceId ? `/api/admin/sources/${editingSourceId}` : '/api/admin/sources';
       const method = editingSourceId ? 'PUT' : 'POST';
 
-      const res = await fetch(endpoint, {
+      const data = await fetchJson(endpoint, {
         method: method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-
-      const data = await res.json();
-      if (res.ok) {
-        alert(editingSourceId ? "Source configuration updated successfully!" : `Success! Source deployed with ID: ${data.id}`);
-        resetForm();
-        fetchData();
-      } else {
-        alert(`Error encountered: ${data.error}`);
-      }
+      alert(editingSourceId ? "Source configuration updated successfully!" : `Success! Source deployed with ID: ${data.id}`);
+      resetForm();
+      fetchData();
     } catch (err) {
+      alert(`Error encountered: ${err.message}`);
       console.error(err);
     }
   };
@@ -138,13 +120,11 @@ function App() {
   const handleForceSync = async () => {
     try {
       setStatusMessage('Executing asynchronous matching sync cascade...');
-      const res = await fetch('/api/admin/force-sync', { method: 'POST' });
-      const data = await res.json();
+      const data = await fetchJson('/api/admin/force-sync', { method: 'POST' });
       if (data.success) {
         setStatusMessage('Sync complete! Pipeline updated successfully.');
         setAdminData(prev => ({ ...prev, stats: data.stats }));
-        const resEntries = await fetch('/api/entries');
-        const dataEntries = await resEntries.json();
+        const dataEntries = await fetchJson('/api/entries');
         setEntries(dataEntries.entries || []);
       }
     } catch (err) {
@@ -159,21 +139,16 @@ function App() {
       return;
     }
     try {
-      const res = await fetch('/api/manual-match', {
+      await fetchJson('/api/manual-match', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ entry_id: entryId, tvdb_id: String(targetTvdbId).trim() })
       });
-      if (res.ok) {
-        alert("Manual database allocation match established successfully!");
-        setManualIds(prev => { const updated = { ...prev }; delete updated[entryId]; return updated; });
-        fetchData();
-      } else {
-        const errData = await res.json();
-        alert(`Match override failed: ${errData.error}`);
-      }
+      alert("Manual database allocation match established successfully!");
+      setManualIds(prev => { const updated = { ...prev }; delete updated[entryId]; return updated; });
+      fetchData();
     } catch (err) {
-      alert(`Network communication fault: ${err.message}`);
+      alert(`Match override failed: ${err.message}`);
     }
   };
 
@@ -182,20 +157,14 @@ function App() {
       return;
     }
     try {
-      const res = await fetch(`/api/admin/entries/${entryId}/ignore`, {
+      await fetchJson(`/api/admin/entries/${entryId}/ignore`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });
-  
-      if (res.ok) {
-        alert("Entry successfully muted and flagged as ignored.");
-        fetchData(); // Refresh the table metrics and listings
-      } else {
-        const errData = await res.json();
-        alert(`Failed to ignore item: ${errData.error}`);
-      }
+      alert("Entry successfully muted and flagged as ignored.");
+      fetchData();
     } catch (err) {
-      alert(`Network communication fault: ${err.message}`);
+      alert(`Failed to ignore item: ${err.message}`);
     }
   };
   
@@ -240,6 +209,8 @@ function App() {
           <p style={{ ...styles.metricValue, color: '#dc3545' }}>{adminData.stats.ignored}</p>
         </div>
       </section>
+
+      {fetchError && <div style={styles.errorBanner}>{fetchError}</div>}
 
       {statusMessage && <div style={styles.statusToast}>{statusMessage}</div>}
 
@@ -442,6 +413,7 @@ const styles = {
   sourceUrlCode: { display: 'block', fontSize: '0.75rem', color: '#6f42c1', backgroundColor: '#f8f1fa', padding: '6px 10px', borderRadius: '4px', marginBottom: '8px', overflowX: 'auto', whiteSpace: 'nowrap' },
   sourceMetaText: { margin: 0, fontSize: '0.75rem', color: '#6c757d' },
   statusToast: { padding: '12px 16px', backgroundColor: '#e2e3e5', color: '#383d41', borderRadius: '6px', fontSize: '0.85rem', fontWeight: '500', marginBottom: '20px', border: '1px solid #d6d8db' },
+  errorBanner: { padding: '12px 16px', backgroundColor: '#f8d7da', color: '#842029', borderRadius: '6px', fontSize: '0.85rem', fontWeight: '500', marginBottom: '20px', border: '1px solid #f5c2c7' },
   forceSyncBtn: { padding: '10px 20px', backgroundColor: '#198754', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: '600', cursor: 'pointer' },
   filterRow: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '15px', backgroundColor: '#fff', padding: '10px', borderRadius: '8px', border: '1px solid #e9ecef' },
   filterLabel: { fontSize: '0.85rem', fontWeight: 'bold', color: '#495057' },

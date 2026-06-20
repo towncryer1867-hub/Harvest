@@ -2,7 +2,7 @@
 CREATE TABLE IF NOT EXISTS scrape_sources (
     id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
-    url TEXT NOT NULL,
+    url TEXT NOT NULL UNIQUE,
     interval_minutes INTEGER NOT NULL DEFAULT 60,
     config_mapping JSONB NOT NULL,
     is_active BOOLEAN DEFAULT TRUE,
@@ -32,23 +32,35 @@ CREATE TABLE IF NOT EXISTS metadata_seasons (
     CONSTRAINT unique_show_season UNIQUE (show_id, season_number)
 );
 
--- 4. Redefined Table: Universal Media Units (Episodes, Movies, Season Packs)
+-- 4. New Table: Parent Movie Profiles
+CREATE TABLE IF NOT EXISTS metadata_movies (
+    id SERIAL PRIMARY KEY,
+    tvdb_id VARCHAR(50) UNIQUE NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    overview TEXT,
+    poster_path TEXT,
+    release_date VARCHAR(50),
+    last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 5. Universal Media Units (Episodes, Movies, Season Packs)
 CREATE TABLE IF NOT EXISTS metadata_items (
     id SERIAL PRIMARY KEY,
     type VARCHAR(20) NOT NULL,           -- 'episode', 'movie', 'season_pack'
-    tvdb_id VARCHAR(50) UNIQUE,          -- Nullable for custom season packs if needed
+    tvdb_id VARCHAR(50) UNIQUE,          -- Nullable; episode-level TVDB id only
     show_id INT REFERENCES metadata_shows(id) ON DELETE CASCADE,     -- Null for movies
-    season_id INT REFERENCES metadata_seasons(id) ON DELETE CASCADE, -- Null for movies
+    season_id INT REFERENCES metadata_seasons(id) ON DELETE CASCADE,   -- Null for movies
+    movie_id INT REFERENCES metadata_movies(id) ON DELETE CASCADE,     -- Null for TV items
     episode_number INT,                  -- Null for movies and season packs
-    title VARCHAR(255) NOT NULL,         -- Episode title, Movie title, or "Season X Pack"
+    title VARCHAR(255) NOT NULL,
     overview TEXT,
     air_date VARCHAR(50),
-    release_date VARCHAR(50),            -- For movies
     last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT unique_series_episode UNIQUE (show_id, season_id, episode_number)
+    CONSTRAINT unique_series_episode UNIQUE (show_id, season_id, episode_number),
+    CONSTRAINT unique_movie_item UNIQUE (movie_id)
 );
 
--- 5. Updated Table: Scraped Entries (Points directly to the actual item)
+-- 6. Scraped Entries (Points directly to the actual item)
 CREATE TABLE IF NOT EXISTS scraped_entries (
     id SERIAL PRIMARY KEY,
     source_id INTEGER REFERENCES scrape_sources(id) ON DELETE SET NULL,
@@ -63,7 +75,7 @@ CREATE TABLE IF NOT EXISTS scraped_entries (
     match_status VARCHAR(20) DEFAULT 'unmatched' -- 'unmatched', 'matched', 'failed'
 );
 
--- 6. Seed Initial Data: Add LimeTorrents as our first source
+-- 7. Seed Initial Data: Add LimeTorrents as our first source
 INSERT INTO scrape_sources (name, url, interval_minutes, config_mapping)
 VALUES (
     'LimeTorrents - TV: Upload', 
@@ -81,4 +93,4 @@ VALUES (
             "magnet_link": "enclosure"
         }
     }'::jsonb
-) ON CONFLICT DO NOTHING;
+) ON CONFLICT (url) DO NOTHING;

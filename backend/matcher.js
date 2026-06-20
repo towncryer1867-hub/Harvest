@@ -7,7 +7,7 @@ async function processPendingMatches(pool, tvdb) {
     await tvdb.authenticate();
 
     const pending = await pool.query(
-      "SELECT id, title, category, match_status FROM scraped_entries WHERE match_status IN ('unmatched', 'failed') LIMIT 10"
+      "SELECT id, title, category, match_status FROM scraped_entries WHERE match_status IN ('unmatched') LIMIT 10"
     );
 
     for (const entry of pending.rows) {
@@ -20,10 +20,15 @@ async function processPendingMatches(pool, tvdb) {
           continue;
         }
 
+        const searchParams = { q: parsed.title, type: parsed.type, limit: 1 };
+        if (parsed.year) {
+          searchParams.year = parsed.year;
+        }
+
         const searchUrl = `${tvdb.baseUrl}/search`;
         const searchRes = await require('axios').get(searchUrl, {
           headers: tvdb.getHeaders(),
-          params: { q: parsed.title, type: parsed.type, limit: 1 }
+          params: searchParams
         });
 
         const results = searchRes.data.data || [];

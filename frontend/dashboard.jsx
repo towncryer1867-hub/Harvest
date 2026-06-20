@@ -1,14 +1,19 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { fetchJson } from './apiClient'
+
+const PAGE_SIZE = 25;
 
 function App() {
   const [entries, setEntries] = useState([]);
   const [sources, setSources] = useState([]);
   const [adminData, setAdminData] = useState({ stats: { matched: 0, unmatched: 0, failed: 0, ignored: 0 }, failed_items: [] });
   const [loading, setLoading] = useState(true);
+  const [entriesLoading, setEntriesLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('feed'); 
   const [manualIds, setManualIds] = useState({}); 
-  const [statusFilter, setStatusFilter] = useState('all'); 
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [page, setPage] = useState(1);
+  const [pagination, setPagination] = useState({ page: 1, limit: PAGE_SIZE, total: 0, total_pages: 1 });
 
   // --- FORM STATES FOR CREATE & EDIT ---
   const [editingSourceId, setEditingSourceId] = useState(null); // Null = Create Mode, Number = Edit Mode
@@ -33,29 +38,59 @@ function App() {
   const [statusMessage, setStatusMessage] = useState('');
   const [fetchError, setFetchError] = useState(null);
 
-  useEffect(() => {
-    fetchData();
+  const fetchEntries = useCallback(async (pageNum, status) => {
+    setEntriesLoading(true);
+    try {
+      const data = await fetchJson(
+        `/api/entries?page=${pageNum}&limit=${PAGE_SIZE}&status=${encodeURIComponent(status)}`
+      );
+      setEntries(data.entries || []);
+      setPagination(data.pagination || { page: pageNum, limit: PAGE_SIZE, total: 0, total_pages: 1 });
+    } catch (err) {
+      console.error("Error loading feed entries:", err);
+      setFetchError(err.message);
+    } finally {
+      setEntriesLoading(false);
+    }
+  }, []);
+
+  const fetchAdminStats = useCallback(async () => {
+    const dataAdmin = await fetchJson('/api/admin/queue');
+    setAdminData(dataAdmin);
   }, []);
 
   const fetchData = async () => {
     try {
       setLoading(true);
       setFetchError(null);
-      const [dataEntries, dataSources, dataAdmin] = await Promise.all([
-        fetchJson('/api/entries'),
-        fetchJson('/api/admin/sources'),
-        fetchJson('/api/admin/queue')
-      ]);
-
-      setEntries(dataEntries.entries || []);
+      const dataSources = await fetchJson('/api/admin/sources');
       setSources(dataSources.sources || []);
-      setAdminData(dataAdmin);
+      await fetchAdminStats();
     } catch (err) {
       console.error("Error gathering system dashboard metrics:", err);
       setFetchError(err.message);
     } finally {
       setLoading(false);
     }
+  };
+
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  useEffect(() => {
+    fetchEntries(page, statusFilter);
+  }, [page, statusFilter, fetchEntries]);
+
+  const handleStatusFilterChange = (value) => {
+    setStatusFilter(value);
+    setPage(1);
+  };
+
+  const formatHarvestDate = (dateScraped, datePublished) => {
+    const raw = dateScraped || datePublished;
+    if (!raw) return 'N/A';
+    return new Date(raw).toLocaleString();
   };
 
   // Triggers loading existing profile metrics into input states
@@ -123,9 +158,8 @@ function App() {
       const data = await fetchJson('/api/admin/force-sync', { method: 'POST' });
       if (data.success) {
         setStatusMessage('Sync complete! Pipeline updated successfully.');
-        setAdminData(prev => ({ ...prev, stats: data.stats }));
-        const dataEntries = await fetchJson('/api/entries');
-        setEntries(dataEntries.entries || []);
+        await fetchAdminStats();
+        await fetchEntries(page, statusFilter);
       }
     } catch (err) {
       setStatusMessage(`Sync error: ${err.message}`);
@@ -146,7 +180,8 @@ function App() {
       });
       alert("Manual database allocation match established successfully!");
       setManualIds(prev => { const updated = { ...prev }; delete updated[entryId]; return updated; });
-      fetchData();
+      await fetchAdminStats();
+      await fetchEntries(page, statusFilter);
     } catch (err) {
       alert(`Match override failed: ${err.message}`);
     }
@@ -162,16 +197,19 @@ function App() {
         headers: { 'Content-Type': 'application/json' }
       });
       alert("Entry successfully muted and flagged as ignored.");
-      fetchData();
+      await fetchAdminStats();
+      await fetchEntries(page, statusFilter);
     } catch (err) {
       alert(`Failed to ignore item: ${err.message}`);
     }
   };
   
-  const filteredEntries = entries.filter(entry => {
-    if (statusFilter === 'all') return true;
-    return entry.match_status === statusFilter;
-  });
+  const filteredEntries = entries;
+
+  const rangeStart = pagination.total === 0 ? 0 : (pagination.page - 1) * pagination.limit + 1;
+  const rangeEnd = Math.min(pagination.page * pagination.limit, pagination.total);
+
+  const totalAll = adminData.stats.matched + adminData.stats.unmatched + adminData.stats.failed + adminData.stats.ignored;
 
   if (loading) {
     return <div style={{ padding: '40px', textAlign: 'center', fontFamily: 'sans-serif', color: '#666' }}>Loading system diagnostic control layers...</div>;
@@ -219,13 +257,42 @@ function App() {
           <div>
             <div style={styles.filterRow}>
               <label style={styles.filterLabel}>Filter Feed Status:</label>
-              <select style={styles.filterDropdown} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
-                <option value="all">Display All Gathered Listings ({entries.length})</option>
+              <select style={styles.filterDropdown} value={statusFilter} onChange={(e) => handleStatusFilterChange(e.target.value)}>
+                <option value="all">Display All Gathered Listings ({totalAll})</option>
                 <option value="matched">Successfully Linked Catalog Items ({adminData.stats.matched})</option>
                 <option value="unmatched">Awaiting Ingestion Processing ({adminData.stats.unmatched})</option>
                 <option value="failed">Flagged Unresolved Strings ({adminData.stats.failed})</option>
-                <option value="ignored">Manually Ignored Items Items ({adminData.stats.ignored})</option>
+                <option value="ignored">Manually Ignored Items ({adminData.stats.ignored})</option>
               </select>
+            </div>
+
+            <div style={styles.paginationBar}>
+              <span style={styles.paginationMeta}>
+                {entriesLoading
+                  ? 'Loading entries...'
+                  : pagination.total === 0
+                    ? 'No entries to display'
+                    : `Showing ${rangeStart}–${rangeEnd} of ${pagination.total} (newest first)`}
+              </span>
+              <div style={styles.paginationControls}>
+                <button
+                  style={styles.pageBtn}
+                  disabled={pagination.page <= 1 || entriesLoading}
+                  onClick={() => setPage(p => p - 1)}
+                >
+                  Previous
+                </button>
+                <span style={styles.pageIndicator}>
+                  Page {pagination.page} of {pagination.total_pages}
+                </span>
+                <button
+                  style={styles.pageBtn}
+                  disabled={pagination.page >= pagination.total_pages || entriesLoading}
+                  onClick={() => setPage(p => p + 1)}
+                >
+                  Next
+                </button>
+              </div>
             </div>
 
             <div style={styles.tableCard}>
@@ -235,16 +302,23 @@ function App() {
                     <th style={styles.th}>Title</th>
                     <th style={styles.th}>Category</th>
                     <th style={styles.th}>Source</th>
+                    <th style={styles.th}>Harvested</th>
                     <th style={styles.th}>Status</th>
                     <th style={styles.th}>Manual Override Link</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredEntries.map(entry => (
+                  {filteredEntries.length === 0 && !entriesLoading ? (
+                    <tr>
+                      <td colSpan={6} style={styles.emptyTableCell}>No entries match the current filter.</td>
+                    </tr>
+                  ) : (
+                  filteredEntries.map(entry => (
                     <tr key={entry.id} style={styles.tableBodyRow}>
                       <td style={styles.tdTitleColumn}>{entry.title}</td>
                       <td style={styles.tdCategoryColumn}><span style={styles.categoryBadge}>{entry.category || 'N/A'}</span></td>
                       <td style={styles.td}>{entry.source_name || 'Generic Feed'}</td>
+                      <td style={styles.tdDateColumn}>{formatHarvestDate(entry.date_scraped, entry.date_published)}</td>
                       <td style={styles.td}>
                         <span style={{
                           ...styles.statusBadge,
@@ -282,10 +356,40 @@ function App() {
                       )}
                       </td>
                     </tr>
-                  ))}
+                  )))}
                 </tbody>
               </table>
             </div>
+
+            <div style={styles.paginationBar}>
+              <span style={styles.paginationMeta}>
+                {entriesLoading
+                  ? 'Loading entries...'
+                  : pagination.total === 0
+                    ? 'No entries to display'
+                    : `Showing ${rangeStart}–${rangeEnd} of ${pagination.total} (newest first)`}
+              </span>
+              <div style={styles.paginationControls}>
+                <button
+                  style={styles.pageBtn}
+                  disabled={pagination.page <= 1 || entriesLoading}
+                  onClick={() => setPage(p => p - 1)}
+                >
+                  Previous
+                </button>
+                <span style={styles.pageIndicator}>
+                  Page {pagination.page} of {pagination.total_pages}
+                </span>
+                <button
+                  style={styles.pageBtn}
+                  disabled={pagination.page >= pagination.total_pages || entriesLoading}
+                  onClick={() => setPage(p => p + 1)}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+
           </div>
         )}
 
@@ -418,6 +522,13 @@ const styles = {
   filterRow: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '15px', backgroundColor: '#fff', padding: '10px', borderRadius: '8px', border: '1px solid #e9ecef' },
   filterLabel: { fontSize: '0.85rem', fontWeight: 'bold', color: '#495057' },
   filterDropdown: { flex: 1, padding: '6px 10px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.85rem', backgroundColor: '#ffffff', cursor: 'pointer' },
+  paginationBar: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', padding: '10px 12px', backgroundColor: '#fff', borderRadius: '8px', border: '1px solid #e9ecef', flexWrap: 'wrap', gap: '10px' },
+  paginationMeta: { fontSize: '0.85rem', color: '#6c757d' },
+  paginationControls: { display: 'flex', alignItems: 'center', gap: '10px' },
+  pageBtn: { padding: '6px 12px', borderRadius: '4px', border: '1px solid #ced4da', backgroundColor: '#fff', fontSize: '0.85rem', fontWeight: '600', cursor: 'pointer' },
+  pageIndicator: { fontSize: '0.85rem', color: '#495057', fontWeight: '600' },
+  tdDateColumn: { padding: '12px 16px', color: '#6c757d', fontSize: '0.8rem', whiteSpace: 'nowrap' },
+  emptyTableCell: { padding: '24px 16px', textAlign: 'center', color: '#6c757d', fontSize: '0.85rem' },
   formCard: { backgroundColor: '#ffffff', borderRadius: '8px', padding: '15px', border: '1px solid #e9ecef', alignSelf: 'start' },
   formLayout: { display: 'flex', flexDirection: 'column', gap: '10px' },
   formInput: { padding: '8px 12px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.85rem' },

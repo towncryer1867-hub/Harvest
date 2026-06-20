@@ -159,17 +159,49 @@ app.get('/api/media/shows/:showId/seasons/:seasonNumber/pack-entries', async (re
   }
 });
 
-// API Route: View raw unmatched or general feed logs
+// API Route: View raw unmatched or general feed logs (paginated, newest first)
 app.get('/api/entries', async (req, res) => {
   try {
-    const entries = await pool.query(`
-      SELECT e.id, e.title, e.category, e.date_published, e.match_status, s.name as source_name 
-      FROM scraped_entries e
-      LEFT JOIN scrape_sources s ON e.source_id = s.id
-      ORDER BY e.date_published DESC 
-      LIMIT 50
-    `);
-    res.json({ count: entries.rowCount, entries: entries.rows });
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
+    const offset = (page - 1) * limit;
+    const status = req.query.status;
+
+    const params = [];
+    let whereClause = '';
+    if (status && status !== 'all') {
+      params.push(status);
+      whereClause = 'WHERE e.match_status = $1';
+    }
+
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM scraped_entries e ${whereClause}`,
+      params
+    );
+    const total = countResult.rows[0].total;
+
+    const limitIdx = params.length + 1;
+    const offsetIdx = params.length + 2;
+    const entries = await pool.query(
+      `SELECT e.id, e.title, e.category, e.date_published, e.date_scraped, e.match_status, s.name AS source_name
+       FROM scraped_entries e
+       LEFT JOIN scrape_sources s ON e.source_id = s.id
+       ${whereClause}
+       ORDER BY COALESCE(e.date_scraped, e.date_published) DESC, e.id DESC
+       LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      [...params, limit, offset]
+    );
+
+    res.json({
+      count: entries.rowCount,
+      entries: entries.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: Math.max(1, Math.ceil(total / limit)),
+      },
+    });
   } catch (error) {
     sendError(res, error);
   }

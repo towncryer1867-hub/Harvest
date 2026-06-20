@@ -27,6 +27,17 @@ async function parseXMLFeed(xmlString, mapping) {
       magnetLink = item[selectors.magnet_link].url || item[selectors.magnet_link];
     }
 
+    // Extract raw category reference safely
+    let rawCategory = item[selectors.category] || 'Unknown';
+    let cleanCategory = 'Unknown';
+
+    if (typeof rawCategory === 'string') {
+      cleanCategory = rawCategory;
+    } else if (rawCategory && typeof rawCategory === 'object') {
+      // If xml2js captured attributes, look for the text property '_'
+      cleanCategory = rawCategory['_'] || 'Unknown';
+    }
+
     // --- NEW REGEX DESCRIPTION EXTRACTION LOGIC ---
     let rawDescription = item[selectors.description] || '';
     let seedsCount = 0;
@@ -48,7 +59,7 @@ async function parseXMLFeed(xmlString, mapping) {
     return {
       title: item[selectors.title] || 'Untitled Entry',
       source_link: item[selectors.source_link] || '',
-      category: item[selectors.category] || 'Unknown',
+      category: cleanCategory.trim(),
       description: cleanDescription,
       magnet_link: magnetLink,
       date_published: item[selectors.date_published] || null

@@ -76,17 +76,75 @@ class TVDBClient {
   }
 
   /**
+   * Normalizes TVDB artwork paths to fully-qualified URLs.
+   */
+  normalizeImageUrl(url) {
+    if (!url) return '';
+    if (url.startsWith('http://') || url.startsWith('https://')) return url;
+    const path = url.startsWith('/') ? url : `/${url}`;
+    return `https://artworks.thetvdb.com${path}`;
+  }
+
+  /**
+   * Fetches full expanded details for a specific Movie by its TVDB ID.
+   */
+  async getMovieDetails(tvdbId) {
+    if (!this.token) await this.authenticate();
+    try {
+      const response = await axios.get(`${this.baseUrl}/movies/${tvdbId}/extended`, {
+        headers: this.getHeaders(),
+        params: { meta: 'translations' },
+      });
+      return response.data.data;
+    } catch (error) {
+      console.error(`Error fetching TVDB movie extended metadata for ID ${tvdbId}:`, error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Fetches English translation for a movie.
+   */
+  async getMovieTranslation(tvdbId, language = 'eng') {
+    if (!this.token) await this.authenticate();
+    try {
+      const response = await axios.get(`${this.baseUrl}/movies/${tvdbId}/translations/${language}`, {
+        headers: this.getHeaders(),
+      });
+      return response.data.data;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /**
    * Fetches full expanded details for a specific Series by its TVDB ID.
    */
   async getSeriesDetails(tvdbId) {
     if (!this.token) await this.authenticate();
     try {
       const response = await axios.get(`${this.baseUrl}/series/${tvdbId}/extended`, {
-        headers: this.getHeaders()
+        headers: this.getHeaders(),
+        params: { meta: 'translations' },
       });
       return response.data.data;
     } catch (error) {
       console.error(`Error fetching TVDB series extended metadata for ID ${tvdbId}:`, error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Fetches English translation for a series.
+   */
+  async getSeriesTranslation(tvdbId, language = 'eng') {
+    if (!this.token) await this.authenticate();
+    try {
+      const response = await axios.get(`${this.baseUrl}/series/${tvdbId}/translations/${language}`, {
+        headers: this.getHeaders(),
+      });
+      return response.data.data;
+    } catch (error) {
       return null;
     }
   }

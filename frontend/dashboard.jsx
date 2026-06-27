@@ -1,16 +1,22 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
+import { fetchJson } from './apiClient'
+
+const PAGE_SIZE = 25;
 
 function App() {
   const [entries, setEntries] = useState([]);
   const [sources, setSources] = useState([]);
-  const [adminData, setAdminData] = useState({ stats: { matched: 0, unmatched: 0, failed: 0, ignored: 0 }, failed_items: [] });
+  const [adminData, setAdminData] = useState({ stats: { matched: 0, unmatched: 0, failed: 0, ignored: 0, processing: 0 }, failed_items: [] });
   const [loading, setLoading] = useState(true);
+  const [entriesLoading, setEntriesLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('feed'); 
   const [manualIds, setManualIds] = useState({}); 
-  const [statusFilter, setStatusFilter] = useState('all'); 
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [page, setPage] = useState(1);
+  const [pagination, setPagination] = useState({ page: 1, limit: PAGE_SIZE, total: 0, total_pages: 1 });
 
   // --- FORM STATES FOR CREATE & EDIT ---
-  const [editingSourceId, setEditingSourceId] = useState(null); // Null = Create Mode, Number = Edit Mode
+  const [editingSourceId, setEditingSourceId] = useState(null);
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
   const [interval_minutes, setIntervalMinutes] = useState('');
@@ -30,48 +36,72 @@ function App() {
     }, null, 2)
   );
   const [statusMessage, setStatusMessage] = useState('');
+  const [fetchError, setFetchError] = useState(null);
 
-  useEffect(() => {
-    fetchData();
+  const fetchEntries = useCallback(async (pageNum, status) => {
+    setEntriesLoading(true);
+    try {
+      const data = await fetchJson(
+        `/api/entries?page=${pageNum}&limit=${PAGE_SIZE}&status=${encodeURIComponent(status)}`
+      );
+      setEntries(data.entries || []);
+      setPagination(data.pagination || { page: pageNum, limit: PAGE_SIZE, total: 0, total_pages: 1 });
+    } catch (err) {
+      console.error("Error loading feed entries:", err);
+      setFetchError(err.message);
+    } finally {
+      setEntriesLoading(false);
+    }
+  }, []);
+
+  const fetchAdminStats = useCallback(async () => {
+    const dataAdmin = await fetchJson('/api/admin/queue');
+    setAdminData(dataAdmin);
   }, []);
 
   const fetchData = async () => {
     try {
       setLoading(true);
-      const [resEntries, resSources, resAdmin] = await Promise.all([
-        fetch('/api/entries'),
-        fetch('/api/admin/queue'), // Using existing endpoint metadata shapes
-        fetch('/api/admin/queue')
-      ]);
-
-      const dataEntries = await resEntries.json();
-      const dataAdmin = await resAdmin.json();
-
-      setEntries(dataEntries.entries || []);
-      setAdminData(dataAdmin);
-      
-      // Temporary array hydration layer matching data context expectations
-      setSources([
-        { 
-          id: 1, 
-          name: 'LimeTorrents - TV: Upload', 
-          url: 'https://www.limetorrents.fun/searchrss/Upload/', 
-          interval_minutes: 30, 
-          is_active: true,
-          config_mapping: {
-            parser: "xml",
-            selectors: { item: "item", title: "title", source_link: "link", date_published: "pubDate", category: "category", description: "description", magnet_link: "enclosure" }
-          }
-        }
-      ]);
+      setFetchError(null);
+      const dataSources = await fetchJson('/api/admin/sources');
+      setSources(dataSources.sources || []);
+      await fetchAdminStats();
     } catch (err) {
       console.error("Error gathering system dashboard metrics:", err);
+      setFetchError(err.message);
     } finally {
       setLoading(false);
     }
   };
 
-  // Triggers loading existing profile metrics into input states
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  useEffect(() => {
+    fetchEntries(page, statusFilter);
+  }, [page, statusFilter, fetchEntries]);
+
+  // Auto-refresh: poll stats and feed every 15 seconds
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetchAdminStats();
+      fetchEntries(page, statusFilter);
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [page, statusFilter, fetchAdminStats, fetchEntries]);
+
+  const handleStatusFilterChange = (value) => {
+    setStatusFilter(value);
+    setPage(1);
+  };
+
+  const formatHarvestDate = (dateScraped, datePublished) => {
+    const raw = dateScraped || datePublished;
+    if (!raw) return 'N/A';
+    return new Date(raw).toLocaleString();
+  };
+
   const handleEditClick = (source) => {
     setEditingSourceId(source.id);
     setName(source.name);
@@ -116,21 +146,16 @@ function App() {
       const endpoint = editingSourceId ? `/api/admin/sources/${editingSourceId}` : '/api/admin/sources';
       const method = editingSourceId ? 'PUT' : 'POST';
 
-      const res = await fetch(endpoint, {
+      const data = await fetchJson(endpoint, {
         method: method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-
-      const data = await res.json();
-      if (res.ok) {
-        alert(editingSourceId ? "Source configuration updated successfully!" : `Success! Source deployed with ID: ${data.id}`);
-        resetForm();
-        fetchData();
-      } else {
-        alert(`Error encountered: ${data.error}`);
-      }
+      alert(editingSourceId ? "Source configuration updated successfully!" : `Success! Source deployed with ID: ${data.id}`);
+      resetForm();
+      fetchData();
     } catch (err) {
+      alert(`Error encountered: ${err.message}`);
       console.error(err);
     }
   };
@@ -138,14 +163,11 @@ function App() {
   const handleForceSync = async () => {
     try {
       setStatusMessage('Executing asynchronous matching sync cascade...');
-      const res = await fetch('/api/admin/force-sync', { method: 'POST' });
-      const data = await res.json();
+      const data = await fetchJson('/api/admin/force-sync', { method: 'POST' });
       if (data.success) {
         setStatusMessage('Sync complete! Pipeline updated successfully.');
-        setAdminData(prev => ({ ...prev, stats: data.stats }));
-        const resEntries = await fetch('/api/entries');
-        const dataEntries = await resEntries.json();
-        setEntries(dataEntries.entries || []);
+        await fetchAdminStats();
+        await fetchEntries(page, statusFilter);
       }
     } catch (err) {
       setStatusMessage(`Sync error: ${err.message}`);
@@ -159,21 +181,17 @@ function App() {
       return;
     }
     try {
-      const res = await fetch('/api/manual-match', {
+      await fetchJson('/api/manual-match', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ entry_id: entryId, tvdb_id: String(targetTvdbId).trim() })
       });
-      if (res.ok) {
-        alert("Manual database allocation match established successfully!");
-        setManualIds(prev => { const updated = { ...prev }; delete updated[entryId]; return updated; });
-        fetchData();
-      } else {
-        const errData = await res.json();
-        alert(`Match override failed: ${errData.error}`);
-      }
+      alert("Manual database allocation match established successfully!");
+      setManualIds(prev => { const updated = { ...prev }; delete updated[entryId]; return updated; });
+      await fetchAdminStats();
+      await fetchEntries(page, statusFilter);
     } catch (err) {
-      alert(`Network communication fault: ${err.message}`);
+      alert(`Match override failed: ${err.message}`);
     }
   };
 
@@ -182,27 +200,47 @@ function App() {
       return;
     }
     try {
-      const res = await fetch(`/api/admin/entries/${entryId}/ignore`, {
+      await fetchJson(`/api/admin/entries/${entryId}/ignore`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });
-  
-      if (res.ok) {
-        alert("Entry successfully muted and flagged as ignored.");
-        fetchData(); // Refresh the table metrics and listings
-      } else {
-        const errData = await res.json();
-        alert(`Failed to ignore item: ${errData.error}`);
-      }
+      alert("Entry successfully muted and flagged as ignored.");
+      await fetchAdminStats();
+      await fetchEntries(page, statusFilter);
     } catch (err) {
-      alert(`Network communication fault: ${err.message}`);
+      alert(`Failed to ignore item: ${err.message}`);
     }
   };
-  
-  const filteredEntries = entries.filter(entry => {
-    if (statusFilter === 'all') return true;
-    return entry.match_status === statusFilter;
-  });
+
+  const getStatusBadgeStyle = (status) => {
+    switch (status) {
+      case 'matched':    return { backgroundColor: '#e2f0d9', color: '#385723' };
+      case 'failed':     return { backgroundColor: '#fce4d6', color: '#c65911' };
+      case 'processing': return { backgroundColor: '#dbeafe', color: '#1e40af' };
+      case 'ignored':    return { backgroundColor: '#e9ecef', color: '#6c757d' };
+      default:           return { backgroundColor: '#fff3cd', color: '#856404' };
+    }
+  };
+
+  const handleRetryEntry = async (entryId) => {
+    try {
+      await fetchJson(`/api/admin/entries/${entryId}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      await fetchAdminStats();
+      await fetchEntries(page, statusFilter);
+    } catch (err) {
+      alert(`Failed to reset entry: ${err.message}`);
+    }
+  };
+
+  const filteredEntries = entries;
+
+  const rangeStart = pagination.total === 0 ? 0 : (pagination.page - 1) * pagination.limit + 1;
+  const rangeEnd = Math.min(pagination.page * pagination.limit, pagination.total);
+
+  const totalAll = adminData.stats.matched + adminData.stats.unmatched + adminData.stats.failed + adminData.stats.ignored + (adminData.stats.processing || 0);
 
   if (loading) {
     return <div style={{ padding: '40px', textAlign: 'center', fontFamily: 'sans-serif', color: '#666' }}>Loading system diagnostic control layers...</div>;
@@ -227,6 +265,10 @@ function App() {
           <h3 style={styles.metricTitle}>Matched</h3>
           <p style={{ ...styles.metricValue, color: '#198754' }}>{adminData.stats.matched}</p>
         </div>
+        <div style={{ ...styles.metricCard, borderLeft: '4px solid #1e40af' }}>
+          <h3 style={styles.metricTitle}>Processing</h3>
+          <p style={{ ...styles.metricValue, color: '#1e40af' }}>{adminData.stats.processing || 0}</p>
+        </div>
         <div style={{ ...styles.metricCard, borderLeft: '4px solid #ffc107' }}>
           <h3 style={styles.metricTitle}>Unmatched</h3>
           <p style={{ ...styles.metricValue, color: '#ffc107' }}>{adminData.stats.unmatched}</p>
@@ -235,11 +277,13 @@ function App() {
           <h3 style={styles.metricTitle}>Parsing Failures</h3>
           <p style={{ ...styles.metricValue, color: '#dc3545' }}>{adminData.stats.failed}</p>
         </div>
-        <div style={{ ...styles.metricCard, borderLeft: '4px solid #dc3545' }}>
-          <h3 style={styles.metricTitle}>Ignored Entites</h3>
-          <p style={{ ...styles.metricValue, color: '#dc3545' }}>{adminData.stats.ignored}</p>
+        <div style={{ ...styles.metricCard, borderLeft: '4px solid #6c757d' }}>
+          <h3 style={styles.metricTitle}>Ignored</h3>
+          <p style={{ ...styles.metricValue, color: '#6c757d' }}>{adminData.stats.ignored}</p>
         </div>
       </section>
+
+      {fetchError && <div style={styles.errorBanner}>{fetchError}</div>}
 
       {statusMessage && <div style={styles.statusToast}>{statusMessage}</div>}
 
@@ -248,13 +292,43 @@ function App() {
           <div>
             <div style={styles.filterRow}>
               <label style={styles.filterLabel}>Filter Feed Status:</label>
-              <select style={styles.filterDropdown} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
-                <option value="all">Display All Gathered Listings ({entries.length})</option>
+              <select style={styles.filterDropdown} value={statusFilter} onChange={(e) => handleStatusFilterChange(e.target.value)}>
+                <option value="all">Display All Gathered Listings ({totalAll})</option>
                 <option value="matched">Successfully Linked Catalog Items ({adminData.stats.matched})</option>
+                <option value="processing">Currently Matching ({adminData.stats.processing || 0})</option>
                 <option value="unmatched">Awaiting Ingestion Processing ({adminData.stats.unmatched})</option>
                 <option value="failed">Flagged Unresolved Strings ({adminData.stats.failed})</option>
-                <option value="ignored">Manually Ignored Items Items ({adminData.stats.ignored})</option>
+                <option value="ignored">Manually Ignored Items ({adminData.stats.ignored})</option>
               </select>
+            </div>
+
+            <div style={styles.paginationBar}>
+              <span style={styles.paginationMeta}>
+                {entriesLoading
+                  ? 'Loading entries...'
+                  : pagination.total === 0
+                    ? 'No entries to display'
+                    : `Showing ${rangeStart}–${rangeEnd} of ${pagination.total} (newest first)`}
+              </span>
+              <div style={styles.paginationControls}>
+                <button
+                  style={styles.pageBtn}
+                  disabled={pagination.page <= 1 || entriesLoading}
+                  onClick={() => setPage(p => p - 1)}
+                >
+                  Previous
+                </button>
+                <span style={styles.pageIndicator}>
+                  Page {pagination.page} of {pagination.total_pages}
+                </span>
+                <button
+                  style={styles.pageBtn}
+                  disabled={pagination.page >= pagination.total_pages || entriesLoading}
+                  onClick={() => setPage(p => p + 1)}
+                >
+                  Next
+                </button>
+              </div>
             </div>
 
             <div style={styles.tableCard}>
@@ -264,57 +338,101 @@ function App() {
                     <th style={styles.th}>Title</th>
                     <th style={styles.th}>Category</th>
                     <th style={styles.th}>Source</th>
+                    <th style={styles.th}>Harvested</th>
                     <th style={styles.th}>Status</th>
                     <th style={styles.th}>Manual Override Link</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredEntries.map(entry => (
+                  {filteredEntries.length === 0 && !entriesLoading ? (
+                    <tr>
+                      <td colSpan={6} style={styles.emptyTableCell}>No entries match the current filter.</td>
+                    </tr>
+                  ) : (
+                  filteredEntries.map(entry => (
                     <tr key={entry.id} style={styles.tableBodyRow}>
                       <td style={styles.tdTitleColumn}>{entry.title}</td>
                       <td style={styles.tdCategoryColumn}><span style={styles.categoryBadge}>{entry.category || 'N/A'}</span></td>
                       <td style={styles.td}>{entry.source_name || 'Generic Feed'}</td>
+                      <td style={styles.tdDateColumn}>{formatHarvestDate(entry.date_scraped, entry.date_published)}</td>
                       <td style={styles.td}>
-                        <span style={{
-                          ...styles.statusBadge,
-                          backgroundColor: entry.match_status === 'matched' ? '#e2f0d9' : entry.match_status === 'failed' ? '#fce4d6' : '#fff3cd',
-                          color: entry.match_status === 'matched' ? '#385723' : entry.match_status === 'failed' ? '#c65911' : '#856404'
-                        }}>
-                          {entry.match_status}
+                        <span style={{ ...styles.statusBadge, ...getStatusBadgeStyle(entry.match_status) }}>
+                          {entry.match_status === 'processing' ? '⏳ processing' : entry.match_status}
                         </span>
                       </td>
                       <td style={styles.td}>
-                      {entry.match_status !== 'matched' && entry.match_status !== 'ignored' && (
-                        <div style={styles.actionColumnWrapper}>
-                          <div style={styles.manualMatchWrapper}>
-                            <input 
-                              type="text" 
-                              placeholder="TVDB ID" 
-                              style={styles.manualInput} 
-                              value={manualIds[entry.id] || ''} 
-                              onChange={(e) => setManualIds({ ...manualIds, [entry.id]: e.target.value })} 
-                            />
-                            <button style={styles.manualSubmitBtn} onClick={() => handleManualMatchSubmit(entry.id)}>Link</button>
+                        {entry.match_status !== 'matched' && entry.match_status !== 'ignored' && entry.match_status !== 'processing' && (
+                          <div style={styles.actionColumnWrapper}>
+                            <div style={styles.manualMatchWrapper}>
+                              <input 
+                                type="text" 
+                                placeholder="TVDB ID" 
+                                style={styles.manualInput} 
+                                value={manualIds[entry.id] || ''} 
+                                onChange={(e) => setManualIds({ ...manualIds, [entry.id]: e.target.value })} 
+                              />
+                              <button style={styles.manualSubmitBtn} onClick={() => handleManualMatchSubmit(entry.id)}>Link</button>
+                            </div>
+                            {entry.match_status === 'failed' && (
+                              <button
+                                style={styles.retryBtn}
+                                onClick={() => handleRetryEntry(entry.id)}
+                                title="Reset to unmatched for reprocessing"
+                              >
+                                Retry
+                              </button>
+                            )}
+                            <button 
+                              style={styles.ignoreBtn} 
+                              onClick={() => handleIgnoreEntry(entry.id)}
+                              title="Ignore item permanently"
+                            >
+                              Ignore
+                            </button>
                           </div>
-                          
-                          <button 
-                            style={styles.ignoreBtn} 
-                            onClick={() => handleIgnoreEntry(entry.id)}
-                            title="Ignore item permanently"
-                          >
-                            Ignore
-                          </button>
-                        </div>
-                      )}
-                      {entry.match_status === 'ignored' && (
-                        <span style={{ fontSize: '0.8rem', color: '#6c757d', fontStyle: 'italic' }}>Skipped Pipeline</span>
-                      )}
+                        )}
+                        {entry.match_status === 'processing' && (
+                          <span style={{ fontSize: '0.8rem', color: '#1e40af', fontStyle: 'italic' }}>Matching in progress...</span>
+                        )}
+                        {entry.match_status === 'ignored' && (
+                          <span style={{ fontSize: '0.8rem', color: '#6c757d', fontStyle: 'italic' }}>Skipped Pipeline</span>
+                        )}
                       </td>
                     </tr>
-                  ))}
+                  )))}
                 </tbody>
               </table>
             </div>
+
+            <div style={styles.paginationBar}>
+              <span style={styles.paginationMeta}>
+                {entriesLoading
+                  ? 'Loading entries...'
+                  : pagination.total === 0
+                    ? 'No entries to display'
+                    : `Showing ${rangeStart}–${rangeEnd} of ${pagination.total} (newest first)`}
+              </span>
+              <div style={styles.paginationControls}>
+                <button
+                  style={styles.pageBtn}
+                  disabled={pagination.page <= 1 || entriesLoading}
+                  onClick={() => setPage(p => p - 1)}
+                >
+                  Previous
+                </button>
+                <span style={styles.pageIndicator}>
+                  Page {pagination.page} of {pagination.total_pages}
+                </span>
+                <button
+                  style={styles.pageBtn}
+                  disabled={pagination.page >= pagination.total_pages || entriesLoading}
+                  onClick={() => setPage(p => p + 1)}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+
           </div>
         )}
 
@@ -414,22 +532,9 @@ const styles = {
   categoryBadge: { display: 'inline-block', backgroundColor: '#e9ecef', color: '#495057', padding: '3px 8px', borderRadius: '4px', fontSize: '0.75rem', fontWeight: '500' },
   statusBadge: { display: 'inline-block', padding: '4px 8px', borderRadius: '4px', fontSize: '0.75rem', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.2px' },
   manualMatchWrapper: { display: 'flex', gap: '6px', alignItems: 'center' },
-  actionColumnWrapper: { 
-    display: 'flex', 
-    alignItems: 'center', 
-    gap: '12px' 
-  },
-  ignoreBtn: { 
-    padding: '5px 10px', 
-    borderRadius: '4px', 
-    border: '1px solid #dc3545', 
-    backgroundColor: '#fff', 
-    color: '#dc3545', 
-    fontSize: '0.8rem', 
-    fontWeight: '600', 
-    cursor: 'pointer',
-    transition: 'all 0.15s ease'
-  },
+  actionColumnWrapper: { display: 'flex', alignItems: 'center', gap: '12px' },
+  retryBtn: { padding: '5px 10px', borderRadius: '4px', border: '1px solid #f59e0b', backgroundColor: '#fff', color: '#b45309', fontSize: '0.8rem', fontWeight: '600', cursor: 'pointer' },
+  ignoreBtn: { padding: '5px 10px', borderRadius: '4px', border: '1px solid #dc3545', backgroundColor: '#fff', color: '#dc3545', fontSize: '0.8rem', fontWeight: '600', cursor: 'pointer', transition: 'all 0.15s ease' },
   manualInput: { padding: '5px 8px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.8rem', width: '110px', backgroundColor: '#fafafa' },
   manualSubmitBtn: { padding: '5px 10px', borderRadius: '4px', border: 'none', backgroundColor: '#0d6efd', color: '#fff', fontSize: '0.8rem', fontWeight: '600', cursor: 'pointer' },
   twoColumnGrid: { display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: '20px' },
@@ -442,10 +547,18 @@ const styles = {
   sourceUrlCode: { display: 'block', fontSize: '0.75rem', color: '#6f42c1', backgroundColor: '#f8f1fa', padding: '6px 10px', borderRadius: '4px', marginBottom: '8px', overflowX: 'auto', whiteSpace: 'nowrap' },
   sourceMetaText: { margin: 0, fontSize: '0.75rem', color: '#6c757d' },
   statusToast: { padding: '12px 16px', backgroundColor: '#e2e3e5', color: '#383d41', borderRadius: '6px', fontSize: '0.85rem', fontWeight: '500', marginBottom: '20px', border: '1px solid #d6d8db' },
+  errorBanner: { padding: '12px 16px', backgroundColor: '#f8d7da', color: '#842029', borderRadius: '6px', fontSize: '0.85rem', fontWeight: '500', marginBottom: '20px', border: '1px solid #f5c2c7' },
   forceSyncBtn: { padding: '10px 20px', backgroundColor: '#198754', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: '600', cursor: 'pointer' },
   filterRow: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '15px', backgroundColor: '#fff', padding: '10px', borderRadius: '8px', border: '1px solid #e9ecef' },
   filterLabel: { fontSize: '0.85rem', fontWeight: 'bold', color: '#495057' },
   filterDropdown: { flex: 1, padding: '6px 10px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.85rem', backgroundColor: '#ffffff', cursor: 'pointer' },
+  paginationBar: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', padding: '10px 12px', backgroundColor: '#fff', borderRadius: '8px', border: '1px solid #e9ecef', flexWrap: 'wrap', gap: '10px' },
+  paginationMeta: { fontSize: '0.85rem', color: '#6c757d' },
+  paginationControls: { display: 'flex', alignItems: 'center', gap: '10px' },
+  pageBtn: { padding: '6px 12px', borderRadius: '4px', border: '1px solid #ced4da', backgroundColor: '#fff', fontSize: '0.85rem', fontWeight: '600', cursor: 'pointer' },
+  pageIndicator: { fontSize: '0.85rem', color: '#495057', fontWeight: '600' },
+  tdDateColumn: { padding: '12px 16px', color: '#6c757d', fontSize: '0.8rem', whiteSpace: 'nowrap' },
+  emptyTableCell: { padding: '24px 16px', textAlign: 'center', color: '#6c757d', fontSize: '0.85rem' },
   formCard: { backgroundColor: '#ffffff', borderRadius: '8px', padding: '15px', border: '1px solid #e9ecef', alignSelf: 'start' },
   formLayout: { display: 'flex', flexDirection: 'column', gap: '10px' },
   formInput: { padding: '8px 12px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.85rem' },

@@ -1,43 +1,57 @@
 const axios = require('axios');
 const { parseXMLFeed } = require('./parser');
 
+function isSourceDue(source) {
+  if (!source.last_run_at) return true;
+  const elapsedMs = Date.now() - new Date(source.last_run_at).getTime();
+  const intervalMs = source.interval_minutes * 60 * 1000;
+  return elapsedMs >= intervalMs;
+}
+
 /**
- * Runs the scraper for all active sources found in the database.
+ * Runs the scraper for active sources whose interval_minutes schedule has elapsed.
  * @param {Pool} pool - The active PostgreSQL connection pool.
  */
 async function runScraper(pool) {
   console.log(`[${new Date().toISOString()}] Starting scraper cycle...`);
-  
+
   try {
-    // 1. Grab all active targets
     const sourcesQuery = await pool.query(
-      'SELECT id, name, url, config_mapping FROM scrape_sources WHERE is_active = TRUE'
+      `SELECT id, name, url, config_mapping, interval_minutes, last_run_at
+       FROM scrape_sources WHERE is_active = TRUE`
     );
-    
+
     for (const source of sourcesQuery.rows) {
+      if (!isSourceDue(source)) {
+        const elapsedMin = (Date.now() - new Date(source.last_run_at).getTime()) / 60000;
+        const remaining = Math.ceil(source.interval_minutes - elapsedMin);
+        console.log(`Skipping ${source.name}: next run in ~${remaining} min`);
+        continue;
+      }
+
       console.log(`Scraping source: ${source.name} via ${source.url}`);
-      
+
       try {
-        // 2. Fetch the raw XML feed data
         const response = await axios.get(source.url, { timeout: 10000 });
-        
-        // 3. Parse it using our dynamic database rules configuration map
         const parsedEntries = await parseXMLFeed(response.data, source.config_mapping);
-        
+
         console.log(`Found ${parsedEntries.length} entries. Syncing to database...`);
         let insertedCount = 0;
 
-        // 4. Save each item safely into the database
         for (const entry of parsedEntries) {
+          let forcedMatchStatus = 'unmatched';
+          if (entry.category !== 'TV Series' && entry.category !== 'Movie') {
+            forcedMatchStatus = 'ignored';
+          }
           const insertQuery = `
             INSERT INTO scraped_entries 
-              (source_id, title, source_link, category, description, magnet_link, date_published)
+              (source_id, title, source_link, category, description, magnet_link, date_published, match_status)
             VALUES 
-              ($1, $2, $3, $4, $5, $6, $7)
+              ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (source_link) DO NOTHING
             RETURNING id;
           `;
-          
+
           const result = await pool.query(insertQuery, [
             source.id,
             entry.title,
@@ -45,7 +59,8 @@ async function runScraper(pool) {
             entry.category,
             entry.description,
             entry.magnet_link,
-            entry.date_published
+            entry.date_published,
+            forcedMatchStatus
           ]);
 
           if (result.rowCount > 0) {
@@ -53,17 +68,15 @@ async function runScraper(pool) {
           }
         }
 
-        // 5. Update last_run_at timestamp for this source
         await pool.query(
           'UPDATE scrape_sources SET last_run_at = CURRENT_TIMESTAMP WHERE id = $1',
           [source.id]
         );
 
         console.log(`Finished ${source.name}: ${insertedCount} new entries added.`);
-        
+
       } catch (sourceError) {
         console.error(`Error processing source "${source.name}":`, sourceError.message);
-        // In the future, we will write this error explicitly to our system error logs table
       }
     }
   } catch (error) {

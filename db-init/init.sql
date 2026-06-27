@@ -19,6 +19,12 @@ CREATE TABLE IF NOT EXISTS metadata_shows (
     poster_path TEXT,
     banner_path TEXT,
     status VARCHAR(50),
+    network VARCHAR(255),
+    genres TEXT[] DEFAULT '{}',
+    first_aired VARCHAR(50),
+    last_aired VARCHAR(50),
+    original_country VARCHAR(100),
+    original_language VARCHAR(50),
     last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -40,6 +46,12 @@ CREATE TABLE IF NOT EXISTS metadata_movies (
     overview TEXT,
     poster_path TEXT,
     release_date VARCHAR(50),
+    release_year INTEGER,
+    genres TEXT[] DEFAULT '{}',
+    studios TEXT[] DEFAULT '{}',
+    production_companies TEXT[] DEFAULT '{}',
+    original_country VARCHAR(100),
+    original_language VARCHAR(50),
     last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 

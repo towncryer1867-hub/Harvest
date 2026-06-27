@@ -5,6 +5,13 @@ const TVDBClient = require('./tvdb');
 const { processPendingMatches } = require('./matcher');
 const { sendError } = require('./errors');
 const { waitForDatabase } = require('./db');
+const {
+  parseListQuery,
+  buildSeriesQuery,
+  buildMoviesQuery,
+  buildFilterOptionsQueries,
+} = require('./libraryQueries');
+const { pickEnglishTranslation, extractSeriesFields } = require('./tvdbMetadata');
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -26,15 +33,60 @@ const tvdb = new TVDBClient(process.env.TVDB_API_KEY);
 // LIBRARY API ENDPOINTS FOR THE NEW FRONTEND ARCHITECTURE
 // =========================================================================
 
-// MOVIES: Get all unique movie profiles
+// MOVIES: List movie profiles with search, sort, filter, and pagination
 app.get('/api/media/movies', async (req, res) => {
   try {
-    const movies = await pool.query(
-      "SELECT id, tvdb_id, title, overview, poster_path, release_date FROM metadata_movies ORDER BY title ASC"
-    );
-    res.json({ movies: movies.rows });
+    const listQuery = parseListQuery(req, 'movie');
+    const built = buildMoviesQuery({
+      ...listQuery,
+      filters: {
+        genre: req.query.genre || '',
+        studio: req.query.studio || '',
+        production_company: req.query.production_company || '',
+        release_year: req.query.release_year || '',
+        original_country: req.query.original_country || '',
+        original_language: req.query.original_language || '',
+      },
+    });
+
+    const [countResult, movies] = await Promise.all([
+      pool.query(built.countSql, built.params),
+      pool.query(built.dataSql, built.dataParams),
+    ]);
+
+    const total = countResult.rows[0].total;
+    const { page, limit } = built.pagination;
+
+    res.json({
+      movies: movies.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: Math.max(1, Math.ceil(total / limit)),
+      },
+    });
   } catch (err) {
     console.error("Error fetching movies:", err.message);
+    sendError(res, err);
+  }
+});
+
+// MOVIES: Single movie profile (for deep-link / navigation restore)
+app.get('/api/media/movies/:movieId', async (req, res) => {
+  const { movieId } = req.params;
+  try {
+    const result = await pool.query(
+      `SELECT id, tvdb_id, title, overview, poster_path, release_date, release_year,
+              genres, studios, production_companies, original_country, original_language
+       FROM metadata_movies WHERE id = $1`,
+      [parseInt(movieId, 10)]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Movie not found' });
+    }
+    res.json({ movie: result.rows[0] });
+  } catch (err) {
     sendError(res, err);
   }
 });
@@ -58,20 +110,82 @@ app.get('/api/media/movies/:movieId/entries', async (req, res) => {
   }
 });
 
-// TV: Get all top-level TV shows
+// TV: List TV shows with search, sort, filter, and pagination
 app.get('/api/media/shows', async (req, res) => {
   try {
-    const shows = await pool.query(
-      "SELECT id, tvdb_id, title, overview, poster_path FROM metadata_shows ORDER BY title ASC"
-    );
-    res.json({ shows: shows.rows });
+    const listQuery = parseListQuery(req, 'series');
+    const built = buildSeriesQuery({
+      ...listQuery,
+      filters: {
+        network: req.query.network || '',
+        genre: req.query.genre || '',
+        status: req.query.status || '',
+        first_aired_year: req.query.first_aired_year || '',
+        original_country: req.query.original_country || '',
+        original_language: req.query.original_language || '',
+      },
+    });
+
+    const [countResult, shows] = await Promise.all([
+      pool.query(built.countSql, built.params),
+      pool.query(built.dataSql, built.dataParams),
+    ]);
+
+    const total = countResult.rows[0].total;
+    const { page, limit } = built.pagination;
+
+    res.json({
+      shows: shows.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: Math.max(1, Math.ceil(total / limit)),
+      },
+    });
   } catch (err) {
     console.error("Error fetching shows:", err.message);
     sendError(res, err);
   }
 });
 
-// TV: Get all unique seasons for a specific show (Row 1 Selector)
+// LIBRARY: Distinct filter option values for dropdowns
+app.get('/api/media/filter-options', async (req, res) => {
+  const type = req.query.type === 'movie' ? 'movie' : 'series';
+  try {
+    const queries = buildFilterOptionsQueries(type);
+    const entries = await Promise.all(
+      Object.entries(queries).map(async ([key, sql]) => {
+        const result = await pool.query(sql);
+        return [key, result.rows.map((row) => row.value).filter((v) => v != null && v !== '')];
+      })
+    );
+    res.json({ type, options: Object.fromEntries(entries) });
+  } catch (err) {
+    console.error("Error fetching filter options:", err.message);
+    sendError(res, err);
+  }
+});
+
+// TV: Single show profile (for deep-link / navigation restore)
+app.get('/api/media/shows/:showId/profile', async (req, res) => {
+  const { showId } = req.params;
+  try {
+    const result = await pool.query(
+      `SELECT id, tvdb_id, title, overview, poster_path, status, network, genres,
+              first_aired, last_aired, original_country, original_language
+       FROM metadata_shows WHERE id = $1`,
+      [parseInt(showId, 10)]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Show not found' });
+    }
+    res.json({ show: result.rows[0] });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 app.get('/api/media/shows/:showId/seasons', async (req, res) => {
   const { showId } = req.params;
   try {
@@ -216,10 +330,31 @@ app.post('/api/manual-match', async (req, res) => {
     const details = await tvdb.getSeriesDetails(tvdb_id);
     if (!details) return res.status(404).json({ error: "No series found" });
 
+    const englishTranslation =
+      pickEnglishTranslation(details.translations) ||
+      (await tvdb.getSeriesTranslation(tvdb_id));
+    const seriesMeta = extractSeriesFields(details, englishTranslation);
+
     const showRow = await pool.query(`
-      INSERT INTO metadata_shows (tvdb_id, title, overview, poster_path)
-      VALUES ($1, $2, $3, $4) ON CONFLICT (tvdb_id) DO UPDATE SET title = EXCLUDED.title RETURNING id
-    `, [tvdb_id, details.name, details.overview || '', details.image || '']);
+      INSERT INTO metadata_shows (
+        tvdb_id, title, overview, poster_path, status, network, genres,
+        first_aired, last_aired, original_country, original_language
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      ON CONFLICT (tvdb_id) DO UPDATE SET title = EXCLUDED.title RETURNING id
+    `, [
+      tvdb_id,
+      seriesMeta.title,
+      seriesMeta.overview,
+      tvdb.normalizeImageUrl(seriesMeta.poster_path),
+      seriesMeta.status,
+      seriesMeta.network,
+      seriesMeta.genres,
+      seriesMeta.first_aired,
+      seriesMeta.last_aired,
+      seriesMeta.original_country,
+      seriesMeta.original_language,
+    ]);
     
     // Create an explicit structural placeholder pack item for manual fallback allocations
     const seasonRow = await pool.query(`
@@ -230,7 +365,7 @@ app.post('/api/manual-match', async (req, res) => {
     const itemRow = await pool.query(`
       INSERT INTO metadata_items (type, show_id, season_id, title, overview)
       VALUES ('season_pack', $1, $2, $3, $4) RETURNING id
-    `, [showRow.rows[0].id, seasonRow.rows[0].id, `${details.name} - Manual Override Pack`, 'Manually linked resource listing']);
+    `, [showRow.rows[0].id, seasonRow.rows[0].id, `${seriesMeta.title} - Manual Override Pack`, 'Manually linked resource listing']);
 
     await pool.query("UPDATE scraped_entries SET metadata_item_id = $1, match_status = 'matched' WHERE id = $2", [itemRow.rows[0].id, entry_id]);
     res.json({ success: true });
@@ -242,6 +377,24 @@ app.post('/api/manual-match', async (req, res) => {
 // =========================================================================
 // ADMIN API ENDPOINTS
 // =========================================================================
+
+// API Route: UPDATE a failed entry back to unmatched for reprocessing
+app.post('/api/admin/entries/:id/retry', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query(
+      "UPDATE scraped_entries SET match_status = 'unmatched' WHERE id = $1 AND match_status = 'failed' RETURNING id, title",
+      [parseInt(id, 10)]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Entry not found or not in failed status.' });
+    }
+    res.json({ success: true, message: `Reset entry for reprocessing: ${result.rows[0].title}`, id: result.rows[0].id });
+  } catch (error) {
+    console.error("Failed to reset entry status:", error.message);
+    sendError(res, error);
+  }
+});
 
 // API Route: SELECT all tracking scrape sources for the administration panels
 app.get('/api/admin/sources', async (req, res) => {

@@ -39,11 +39,15 @@ async function runScraper(pool) {
         let insertedCount = 0;
 
         for (const entry of parsedEntries) {
+          let forcedMatchStatus = 'unmatched';
+          if (entry.category !== 'TV Series' && entry.category !== 'Movie') {
+            forcedMatchStatus = 'ignored';
+          }
           const insertQuery = `
             INSERT INTO scraped_entries 
-              (source_id, title, source_link, category, description, magnet_link, date_published)
+              (source_id, title, source_link, category, description, magnet_link, date_published, match_status)
             VALUES 
-              ($1, $2, $3, $4, $5, $6, $7)
+              ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (source_link) DO NOTHING
             RETURNING id;
           `;
@@ -55,7 +59,8 @@ async function runScraper(pool) {
             entry.category,
             entry.description,
             entry.magnet_link,
-            entry.date_published
+            entry.date_published,
+            forcedMatchStatus
           ]);
 
           if (result.rowCount > 0) {

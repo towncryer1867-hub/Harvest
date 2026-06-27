@@ -6,7 +6,7 @@ const PAGE_SIZE = 25;
 function App() {
   const [entries, setEntries] = useState([]);
   const [sources, setSources] = useState([]);
-  const [adminData, setAdminData] = useState({ stats: { matched: 0, unmatched: 0, failed: 0, ignored: 0 }, failed_items: [] });
+  const [adminData, setAdminData] = useState({ stats: { matched: 0, unmatched: 0, failed: 0, ignored: 0, processing: 0 }, failed_items: [] });
   const [loading, setLoading] = useState(true);
   const [entriesLoading, setEntriesLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('feed'); 
@@ -16,7 +16,7 @@ function App() {
   const [pagination, setPagination] = useState({ page: 1, limit: PAGE_SIZE, total: 0, total_pages: 1 });
 
   // --- FORM STATES FOR CREATE & EDIT ---
-  const [editingSourceId, setEditingSourceId] = useState(null); // Null = Create Mode, Number = Edit Mode
+  const [editingSourceId, setEditingSourceId] = useState(null);
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
   const [interval_minutes, setIntervalMinutes] = useState('');
@@ -82,6 +82,15 @@ function App() {
     fetchEntries(page, statusFilter);
   }, [page, statusFilter, fetchEntries]);
 
+  // Auto-refresh: poll stats and feed every 15 seconds
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetchAdminStats();
+      fetchEntries(page, statusFilter);
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [page, statusFilter, fetchAdminStats, fetchEntries]);
+
   const handleStatusFilterChange = (value) => {
     setStatusFilter(value);
     setPage(1);
@@ -93,7 +102,6 @@ function App() {
     return new Date(raw).toLocaleString();
   };
 
-  // Triggers loading existing profile metrics into input states
   const handleEditClick = (source) => {
     setEditingSourceId(source.id);
     setName(source.name);
@@ -203,13 +211,36 @@ function App() {
       alert(`Failed to ignore item: ${err.message}`);
     }
   };
-  
+
+  const getStatusBadgeStyle = (status) => {
+    switch (status) {
+      case 'matched':    return { backgroundColor: '#e2f0d9', color: '#385723' };
+      case 'failed':     return { backgroundColor: '#fce4d6', color: '#c65911' };
+      case 'processing': return { backgroundColor: '#dbeafe', color: '#1e40af' };
+      case 'ignored':    return { backgroundColor: '#e9ecef', color: '#6c757d' };
+      default:           return { backgroundColor: '#fff3cd', color: '#856404' };
+    }
+  };
+
+  const handleRetryEntry = async (entryId) => {
+    try {
+      await fetchJson(`/api/admin/entries/${entryId}/retry`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      await fetchAdminStats();
+      await fetchEntries(page, statusFilter);
+    } catch (err) {
+      alert(`Failed to reset entry: ${err.message}`);
+    }
+  };
+
   const filteredEntries = entries;
 
   const rangeStart = pagination.total === 0 ? 0 : (pagination.page - 1) * pagination.limit + 1;
   const rangeEnd = Math.min(pagination.page * pagination.limit, pagination.total);
 
-  const totalAll = adminData.stats.matched + adminData.stats.unmatched + adminData.stats.failed + adminData.stats.ignored;
+  const totalAll = adminData.stats.matched + adminData.stats.unmatched + adminData.stats.failed + adminData.stats.ignored + (adminData.stats.processing || 0);
 
   if (loading) {
     return <div style={{ padding: '40px', textAlign: 'center', fontFamily: 'sans-serif', color: '#666' }}>Loading system diagnostic control layers...</div>;
@@ -234,6 +265,10 @@ function App() {
           <h3 style={styles.metricTitle}>Matched</h3>
           <p style={{ ...styles.metricValue, color: '#198754' }}>{adminData.stats.matched}</p>
         </div>
+        <div style={{ ...styles.metricCard, borderLeft: '4px solid #1e40af' }}>
+          <h3 style={styles.metricTitle}>Processing</h3>
+          <p style={{ ...styles.metricValue, color: '#1e40af' }}>{adminData.stats.processing || 0}</p>
+        </div>
         <div style={{ ...styles.metricCard, borderLeft: '4px solid #ffc107' }}>
           <h3 style={styles.metricTitle}>Unmatched</h3>
           <p style={{ ...styles.metricValue, color: '#ffc107' }}>{adminData.stats.unmatched}</p>
@@ -242,9 +277,9 @@ function App() {
           <h3 style={styles.metricTitle}>Parsing Failures</h3>
           <p style={{ ...styles.metricValue, color: '#dc3545' }}>{adminData.stats.failed}</p>
         </div>
-        <div style={{ ...styles.metricCard, borderLeft: '4px solid #dc3545' }}>
-          <h3 style={styles.metricTitle}>Ignored Entites</h3>
-          <p style={{ ...styles.metricValue, color: '#dc3545' }}>{adminData.stats.ignored}</p>
+        <div style={{ ...styles.metricCard, borderLeft: '4px solid #6c757d' }}>
+          <h3 style={styles.metricTitle}>Ignored</h3>
+          <p style={{ ...styles.metricValue, color: '#6c757d' }}>{adminData.stats.ignored}</p>
         </div>
       </section>
 
@@ -260,6 +295,7 @@ function App() {
               <select style={styles.filterDropdown} value={statusFilter} onChange={(e) => handleStatusFilterChange(e.target.value)}>
                 <option value="all">Display All Gathered Listings ({totalAll})</option>
                 <option value="matched">Successfully Linked Catalog Items ({adminData.stats.matched})</option>
+                <option value="processing">Currently Matching ({adminData.stats.processing || 0})</option>
                 <option value="unmatched">Awaiting Ingestion Processing ({adminData.stats.unmatched})</option>
                 <option value="failed">Flagged Unresolved Strings ({adminData.stats.failed})</option>
                 <option value="ignored">Manually Ignored Items ({adminData.stats.ignored})</option>
@@ -320,40 +356,47 @@ function App() {
                       <td style={styles.td}>{entry.source_name || 'Generic Feed'}</td>
                       <td style={styles.tdDateColumn}>{formatHarvestDate(entry.date_scraped, entry.date_published)}</td>
                       <td style={styles.td}>
-                        <span style={{
-                          ...styles.statusBadge,
-                          backgroundColor: entry.match_status === 'matched' ? '#e2f0d9' : entry.match_status === 'failed' ? '#fce4d6' : '#fff3cd',
-                          color: entry.match_status === 'matched' ? '#385723' : entry.match_status === 'failed' ? '#c65911' : '#856404'
-                        }}>
-                          {entry.match_status}
+                        <span style={{ ...styles.statusBadge, ...getStatusBadgeStyle(entry.match_status) }}>
+                          {entry.match_status === 'processing' ? '⏳ processing' : entry.match_status}
                         </span>
                       </td>
                       <td style={styles.td}>
-                      {entry.match_status !== 'matched' && entry.match_status !== 'ignored' && (
-                        <div style={styles.actionColumnWrapper}>
-                          <div style={styles.manualMatchWrapper}>
-                            <input 
-                              type="text" 
-                              placeholder="TVDB ID" 
-                              style={styles.manualInput} 
-                              value={manualIds[entry.id] || ''} 
-                              onChange={(e) => setManualIds({ ...manualIds, [entry.id]: e.target.value })} 
-                            />
-                            <button style={styles.manualSubmitBtn} onClick={() => handleManualMatchSubmit(entry.id)}>Link</button>
+                        {entry.match_status !== 'matched' && entry.match_status !== 'ignored' && entry.match_status !== 'processing' && (
+                          <div style={styles.actionColumnWrapper}>
+                            <div style={styles.manualMatchWrapper}>
+                              <input 
+                                type="text" 
+                                placeholder="TVDB ID" 
+                                style={styles.manualInput} 
+                                value={manualIds[entry.id] || ''} 
+                                onChange={(e) => setManualIds({ ...manualIds, [entry.id]: e.target.value })} 
+                              />
+                              <button style={styles.manualSubmitBtn} onClick={() => handleManualMatchSubmit(entry.id)}>Link</button>
+                            </div>
+                            {entry.match_status === 'failed' && (
+                              <button
+                                style={styles.retryBtn}
+                                onClick={() => handleRetryEntry(entry.id)}
+                                title="Reset to unmatched for reprocessing"
+                              >
+                                Retry
+                              </button>
+                            )}
+                            <button 
+                              style={styles.ignoreBtn} 
+                              onClick={() => handleIgnoreEntry(entry.id)}
+                              title="Ignore item permanently"
+                            >
+                              Ignore
+                            </button>
                           </div>
-                          
-                          <button 
-                            style={styles.ignoreBtn} 
-                            onClick={() => handleIgnoreEntry(entry.id)}
-                            title="Ignore item permanently"
-                          >
-                            Ignore
-                          </button>
-                        </div>
-                      )}
-                      {entry.match_status === 'ignored' && (
-                        <span style={{ fontSize: '0.8rem', color: '#6c757d', fontStyle: 'italic' }}>Skipped Pipeline</span>
-                      )}
+                        )}
+                        {entry.match_status === 'processing' && (
+                          <span style={{ fontSize: '0.8rem', color: '#1e40af', fontStyle: 'italic' }}>Matching in progress...</span>
+                        )}
+                        {entry.match_status === 'ignored' && (
+                          <span style={{ fontSize: '0.8rem', color: '#6c757d', fontStyle: 'italic' }}>Skipped Pipeline</span>
+                        )}
                       </td>
                     </tr>
                   )))}
@@ -489,22 +532,9 @@ const styles = {
   categoryBadge: { display: 'inline-block', backgroundColor: '#e9ecef', color: '#495057', padding: '3px 8px', borderRadius: '4px', fontSize: '0.75rem', fontWeight: '500' },
   statusBadge: { display: 'inline-block', padding: '4px 8px', borderRadius: '4px', fontSize: '0.75rem', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.2px' },
   manualMatchWrapper: { display: 'flex', gap: '6px', alignItems: 'center' },
-  actionColumnWrapper: { 
-    display: 'flex', 
-    alignItems: 'center', 
-    gap: '12px' 
-  },
-  ignoreBtn: { 
-    padding: '5px 10px', 
-    borderRadius: '4px', 
-    border: '1px solid #dc3545', 
-    backgroundColor: '#fff', 
-    color: '#dc3545', 
-    fontSize: '0.8rem', 
-    fontWeight: '600', 
-    cursor: 'pointer',
-    transition: 'all 0.15s ease'
-  },
+  actionColumnWrapper: { display: 'flex', alignItems: 'center', gap: '12px' },
+  retryBtn: { padding: '5px 10px', borderRadius: '4px', border: '1px solid #f59e0b', backgroundColor: '#fff', color: '#b45309', fontSize: '0.8rem', fontWeight: '600', cursor: 'pointer' },
+  ignoreBtn: { padding: '5px 10px', borderRadius: '4px', border: '1px solid #dc3545', backgroundColor: '#fff', color: '#dc3545', fontSize: '0.8rem', fontWeight: '600', cursor: 'pointer', transition: 'all 0.15s ease' },
   manualInput: { padding: '5px 8px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.8rem', width: '110px', backgroundColor: '#fafafa' },
   manualSubmitBtn: { padding: '5px 10px', borderRadius: '4px', border: 'none', backgroundColor: '#0d6efd', color: '#fff', fontSize: '0.8rem', fontWeight: '600', cursor: 'pointer' },
   twoColumnGrid: { display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: '20px' },

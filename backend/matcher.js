@@ -49,7 +49,7 @@ async function processPendingMatches(pool, tvdb) {
         const parsed = parseMediaTitle(entry.title, entry.category);
         console.log(`Parsed details: (${entry.match_status})`, parsed);
 
-        if (parsed.type !== 'series' && parsed.type !== 'movie') {
+        if (parsed.type !== 'series' && parsed.type !== 'movie' && parsed.type !== 'unknown') {
           await pool.query("UPDATE scraped_entries SET match_status = 'ignored' WHERE id = $1", [entry.id]);
           console.log(`Ignoring entry ID ${entry.id} — unrecognized media type: "${entry.title}"`);
           continue;

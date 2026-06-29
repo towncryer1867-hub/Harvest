@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS scraped_entries (
     magnet_link TEXT,
     date_published TIMESTAMP WITH TIME ZONE,
     date_scraped TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    match_status VARCHAR(20) DEFAULT 'unmatched' -- 'unmatched', 'matched', 'failed'
+    match_status VARCHAR(20) DEFAULT 'unmatched' -- 'unmatched', 'matched', 'failed', 'processing', 'ignored'
 );
 
 -- 7. Seed Initial Data: Add LimeTorrents as our first source

@@ -1,6 +1,35 @@
 const xml2js = require('xml2js');
 
 /**
+ * Normalizes a raw xml2js category node into a clean string.
+ * Handles strings, objects with attributes, and nested properties.
+ */
+function extractCategoryText(rawCategory) {
+  if (!rawCategory) return '';
+  
+  if (typeof rawCategory === 'string') {
+    return rawCategory.trim();
+  }
+  
+  if (typeof rawCategory === 'object') {
+    // Check inner text property '_' produced by mergeAttrs
+    if (rawCategory['_'] && typeof rawCategory['_'] === 'string') {
+      return rawCategory['_'].trim();
+    }
+    // Fallback: If inner text is missing but domain attribute exists, extract from URL
+    if (rawCategory['domain'] && typeof rawCategory['domain'] === 'string') {
+      const urlParts = rawCategory['domain'].replace(/\/$/, '').split('/');
+      const lastPart = urlParts[urlParts.length - 1];
+      if (lastPart) {
+        return lastPart.replace('-', ' ').trim();
+      }
+    }
+  }
+  
+  return '';
+}
+
+/**
  * Parses an XML feed string and extracts entries based on a dynamic source configuration mapping.
  * @param {string} xmlString - Raw XML content from the source URL.
  * @param {Object} mapping - The config_mapping object from the database.
@@ -27,15 +56,27 @@ async function parseXMLFeed(xmlString, mapping) {
       magnetLink = item[selectors.magnet_link].url || item[selectors.magnet_link];
     }
 
-    // Extract raw category reference safely
-    let rawCategory = item[selectors.category] || 'Unknown';
+    // --- MULTI-CATEGORY HANDLING LOGIC ---
+    let rawCategoryInput = item[selectors.category];
     let cleanCategory = 'Unknown';
 
-    if (typeof rawCategory === 'string') {
-      cleanCategory = rawCategory;
-    } else if (rawCategory && typeof rawCategory === 'object') {
-      // If xml2js captured attributes, look for the text property '_'
-      cleanCategory = rawCategory['_'] || 'Unknown';
+    if (Array.isArray(rawCategoryInput)) {
+      // If multiple categories exist, iterate through them to find a preferred primary string
+      for (const catNode of rawCategoryInput) {
+        const text = extractCategoryText(catNode);
+        if (text && text.toLowerCase() !== 'unknown') {
+          cleanCategory = text;
+          // Prioritize standard targets if encountered early
+          if (text.toLowerCase() === 'tv shows' || text.toLowerCase() === 'movies') {
+            console.log('breaking');
+            break;
+          }
+        }
+      }
+    } else if (rawCategoryInput) {
+      // Handle single category node cleanly
+      const text = extractCategoryText(rawCategoryInput);
+      if (text) cleanCategory = text;
     }
 
     // --- NEW REGEX DESCRIPTION EXTRACTION LOGIC ---
@@ -59,7 +100,7 @@ async function parseXMLFeed(xmlString, mapping) {
     return {
       title: item[selectors.title] || 'Untitled Entry',
       source_link: item[selectors.source_link] || '',
-      category: cleanCategory.trim(),
+      category: cleanCategory,
       description: cleanDescription,
       magnet_link: magnetLink,
       date_published: item[selectors.date_published] || null

@@ -39,8 +39,9 @@ async function runScraper(pool) {
         let insertedCount = 0;
 
         for (const entry of parsedEntries) {
+          console.log('entry category', entry.category);
           let forcedMatchStatus = 'unmatched';
-          if (entry.category !== 'TV Series' && entry.category !== 'Movie') {
+          if (entry.category !== 'TV Series' && entry.category !== 'Movie') { // Force ignored for non-series/movie categories - update these as needed
             forcedMatchStatus = 'ignored';
           }
           const insertQuery = `

@@ -1,5 +1,6 @@
 const axios = require('axios');
 const { parseXMLFeed } = require('./parser');
+const { isTvCategory, isMovieCategory } = require('./mediaParser');
 
 function isSourceDue(source) {
   if (!source.last_run_at) return true;
@@ -41,7 +42,7 @@ async function runScraper(pool) {
         for (const entry of parsedEntries) {
           console.log('entry category', entry.category);
           let forcedMatchStatus = 'unmatched';
-          if (entry.category !== 'TV Series' && entry.category !== 'Movie') { // Force ignored for non-series/movie categories - update these as needed
+          if (!isTvCategory(entry.category) && !isMovieCategory(entry.category)) {
             forcedMatchStatus = 'ignored';
           }
           const insertQuery = `

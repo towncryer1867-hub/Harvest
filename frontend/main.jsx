@@ -24,6 +24,13 @@ const DEFAULT_LIBRARY_FILTERS = {
   page: 1,
 };
 
+function formatDateOnly(value) {
+  if (!value) return 'Unknown';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return 'Unknown';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 function buildQueryString(params) {
   const parts = Object.entries(params)
     .filter(([, v]) => v !== '' && v != null)
@@ -622,6 +629,17 @@ function App() {
             <img src={selectedShow.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={selectedShow.title} style={styles.largePoster} />
             <div style={styles.heroMeta}>
               <h1 style={styles.mainTitle}>{selectedShow.title}</h1>
+              <div style={styles.metaDatesRow}>
+                <span style={styles.metaStatusBadge}>{selectedShow.status}</span>
+              </div>
+              <div style={styles.metaDatesRow}>
+                <span style={styles.metaDateItem}>
+                  <strong>Last Aired:</strong> {formatDateOnly(selectedShow.last_aired)}
+                </span>
+                <span style={styles.metaDateItem}>
+                  <strong>Last Published:</strong> {formatDateOnly(selectedShow.latest_published)}
+                </span>
+              </div>
               <p style={styles.descriptionText}>{selectedShow.overview || 'No structural show breakdown summary listed.'}</p>
             </div>
           </div>
@@ -721,6 +739,9 @@ const styles = {
   heroRow: { display: 'flex', gap: '30px', marginBottom: '35px', borderBottom: '1px solid #e9ecef', paddingBottom: '25px' },
   largePoster: { width: '220px', height: '320px', objectFit: 'cover', borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' },
   heroMeta: { flex: 1 },
+  metaDatesRow: { display: 'flex', gap: '20px', marginBottom: '14px', flexWrap: 'wrap' },
+  metaStatusBadge: { fontSize: '0.85rem', color: '#495057', backgroundColor: '#f8f9fa', border: '1px solid #e9ecef', borderRadius: '6px', padding: '6px 12px' },
+  metaDateItem: { fontSize: '0.85rem', color: '#495057', backgroundColor: '#f8f9fa', border: '1px solid #e9ecef', borderRadius: '6px', padding: '6px 12px' },
   mainTitle: { margin: '0 0 10px 0', fontSize: '2rem', fontWeight: 'bold', color: '#2c3e50' },
   descriptionText: { fontSize: '0.95rem', lineHeight: '1.6', color: '#495057', margin: '0 0 20px 0' },
   ingestionBox: { backgroundColor: '#f8f9fa', padding: '20px', borderRadius: '8px', border: '1px solid #e9ecef' },

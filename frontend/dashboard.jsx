@@ -3,6 +3,13 @@ import { fetchJson } from './apiClient'
 
 const PAGE_SIZE = 25;
 
+function formatDateOnly(value) {
+  if (!value) return 'Unknown';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return 'Unknown';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
 function App() {
   const [entries, setEntries] = useState([]);
   const [sources, setSources] = useState([]);
@@ -453,6 +460,7 @@ function App() {
                   </div>
                   <code style={styles.sourceUrlCode}>{src.url}</code>
                   <p style={styles.sourceMetaText}>Frequency Sequence: Checks index endpoints every <strong>{src.interval_minutes} minutes</strong>.</p>
+                  <p style={styles.sourceMetaText}>Last Checked: <strong>{src.last_run_at ? formatDateOnly(src.last_run_at) : 'Never'}</strong></p>
                 </div>
               ))}
             </div>

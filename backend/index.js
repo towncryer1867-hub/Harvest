@@ -172,9 +172,17 @@ app.get('/api/media/shows/:showId/profile', async (req, res) => {
   const { showId } = req.params;
   try {
     const result = await pool.query(
-      `SELECT id, tvdb_id, title, overview, poster_path, status, network, genres,
-              first_aired, last_aired, original_country, original_language
-       FROM metadata_shows WHERE id = $1`,
+      `SELECT s.id, s.tvdb_id, s.title, s.overview, s.poster_path, s.status, s.network, s.genres,
+              s.first_aired, s.last_aired, s.original_country, s.original_language,
+              pub.latest_published
+       FROM metadata_shows s
+       LEFT JOIN LATERAL (
+         SELECT MAX(e.date_published) AS latest_published
+         FROM metadata_items i
+         JOIN scraped_entries e ON e.metadata_item_id = i.id
+         WHERE i.show_id = s.id
+       ) pub ON true
+       WHERE s.id = $1`,
       [parseInt(showId, 10)]
     );
     if (result.rowCount === 0) {
@@ -185,6 +193,7 @@ app.get('/api/media/shows/:showId/profile', async (req, res) => {
     sendError(res, err);
   }
 });
+
 
 app.get('/api/media/shows/:showId/seasons', async (req, res) => {
   const { showId } = req.params;

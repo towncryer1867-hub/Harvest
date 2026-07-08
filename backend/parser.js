@@ -68,7 +68,7 @@ async function parseXMLFeed(xmlString, mapping) {
           cleanCategory = text;
           // Prioritize standard targets if encountered early
           if (text.toLowerCase() === 'tv shows' || text.toLowerCase() === 'movies') {
-            console.log('breaking');
+            console.log('parser.js breaking');
             break;
           }
         }

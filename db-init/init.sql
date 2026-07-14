@@ -25,7 +25,11 @@ CREATE TABLE IF NOT EXISTS metadata_shows (
     last_aired VARCHAR(50),
     original_country VARCHAR(100),
     original_language VARCHAR(50),
-    last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    -- Plex cross-reference (see plexSync.js)
+    in_plex BOOLEAN NOT NULL DEFAULT FALSE,
+    plex_rating_key VARCHAR(50),
+    plex_checked_at TIMESTAMP WITH TIME ZONE
 );
 
 -- 3. New Table: Season Containers
@@ -52,7 +56,11 @@ CREATE TABLE IF NOT EXISTS metadata_movies (
     production_companies TEXT[] DEFAULT '{}',
     original_country VARCHAR(100),
     original_language VARCHAR(50),
-    last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    -- Plex cross-reference (see plexSync.js)
+    in_plex BOOLEAN NOT NULL DEFAULT FALSE,
+    plex_rating_key VARCHAR(50),
+    plex_checked_at TIMESTAMP WITH TIME ZONE
 );
 
 -- 5. Universal Media Units (Episodes, Movies, Season Packs)
@@ -68,9 +76,18 @@ CREATE TABLE IF NOT EXISTS metadata_items (
     overview TEXT,
     air_date VARCHAR(50),
     last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    -- Plex cross-reference (see plexSync.js): applies to episodes, season
+    -- packs (proxy: at least one episode of that season found in Plex),
+    -- and movie items alike.
+    in_plex BOOLEAN NOT NULL DEFAULT FALSE,
+    plex_checked_at TIMESTAMP WITH TIME ZONE,
     CONSTRAINT unique_series_episode UNIQUE (show_id, season_id, episode_number),
     CONSTRAINT unique_movie_item UNIQUE (movie_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_metadata_shows_in_plex ON metadata_shows(in_plex);
+CREATE INDEX IF NOT EXISTS idx_metadata_movies_in_plex ON metadata_movies(in_plex);
+CREATE INDEX IF NOT EXISTS idx_metadata_items_in_plex ON metadata_items(in_plex);
 
 -- 6. Scraped Entries (Points directly to the actual item)
 CREATE TABLE IF NOT EXISTS scraped_entries (

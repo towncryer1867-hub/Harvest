@@ -98,6 +98,7 @@ function buildSeriesQuery(options) {
       s.id, s.tvdb_id, s.title, s.overview, s.poster_path,
       s.status, s.network, s.genres, s.first_aired, s.last_aired,
       s.original_country, s.original_language,
+      s.in_plex, s.plex_checked_at,
       pub.latest_published
     FROM metadata_shows s
     LEFT JOIN LATERAL (
@@ -155,6 +156,7 @@ function buildMoviesQuery(options) {
       m.id, m.tvdb_id, m.title, m.overview, m.poster_path, m.release_date,
       m.release_year, m.genres, m.studios, m.production_companies,
       m.original_country, m.original_language,
+      m.in_plex, m.plex_checked_at,
       pub.latest_published
     FROM metadata_movies m
     LEFT JOIN LATERAL (

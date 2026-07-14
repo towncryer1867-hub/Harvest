@@ -12,6 +12,7 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      #- "D:/Docker/db:/var/lib/postgresql/data" # use once we're done with local testing
       - ./db-init:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
@@ -39,6 +40,10 @@ services:
       - DB_NAME=${DB_NAME}
       - DB_PORT=${DB_PORT}
       - TVDB_API_KEY=${TVDB_API_KEY}
+      - PLEX_SERVER_URL=${PLEX_SERVER_URL}
+      - PLEX_TOKEN=${PLEX_TOKEN}
+      - PLEX_TV_SECTION_ID=${PLEX_TV_SECTION_ID}
+      - PLEX_MOVIE_SECTION_ID=${PLEX_MOVIE_SECTION_ID}
     depends_on:
       db:
         condition: service_healthy

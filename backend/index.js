@@ -5,6 +5,7 @@ const TVDBClient = require('./tvdb');
 const { processPendingMatches } = require('./matcher');
 const { sendError } = require('./errors');
 const { waitForDatabase } = require('./db');
+const { registerPlexRoutes } = require('./plexRoutes');
 const {
   parseListQuery,
   buildSeriesQuery,
@@ -27,6 +28,7 @@ const pool = new Pool({
 });
 
 const tvdb = new TVDBClient(process.env.TVDB_API_KEY);
+registerPlexRoutes(app, pool);
 
 
 // =========================================================================
@@ -78,7 +80,8 @@ app.get('/api/media/movies/:movieId', async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT id, tvdb_id, title, overview, poster_path, release_date, release_year,
-              genres, studios, production_companies, original_country, original_language
+              genres, studios, production_companies, original_country, original_language,
+              in_plex, plex_checked_at
        FROM metadata_movies WHERE id = $1`,
       [parseInt(movieId, 10)]
     );
@@ -174,6 +177,7 @@ app.get('/api/media/shows/:showId/profile', async (req, res) => {
     const result = await pool.query(
       `SELECT s.id, s.tvdb_id, s.title, s.overview, s.poster_path, s.status, s.network, s.genres,
               s.first_aired, s.last_aired, s.original_country, s.original_language,
+              s.in_plex, s.plex_checked_at,
               pub.latest_published
        FROM metadata_shows s
        LEFT JOIN LATERAL (
@@ -214,7 +218,7 @@ app.get('/api/media/shows/:showId/season-packs', async (req, res) => {
   const { showId } = req.params;
   try {
     const packs = await pool.query(
-      `SELECT i.id, i.title, i.overview, s.season_number 
+      `SELECT i.id, i.title, i.overview, i.in_plex, s.season_number 
        FROM metadata_items i
        JOIN metadata_seasons s ON i.season_id = s.id
        WHERE i.show_id = $1 AND i.type = 'season_pack'
@@ -233,7 +237,7 @@ app.get('/api/media/shows/:showId/episodes', async (req, res) => {
   const { showId } = req.params;
   try {
     const episodes = await pool.query(
-      `SELECT i.id, i.title, i.overview, i.episode_number, i.air_date, s.season_number 
+      `SELECT i.id, i.title, i.overview, i.episode_number, i.air_date, i.in_plex, s.season_number 
        FROM metadata_items i
        JOIN metadata_seasons s ON i.season_id = s.id
        WHERE i.show_id = $1 AND i.type = 'episode'

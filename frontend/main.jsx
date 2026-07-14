@@ -3,6 +3,9 @@ import ReactDOM from 'react-dom/client'
 import AdminDashboard from './dashboard'
 import { fetchJson } from './apiClient'
 import { readNavigation, writeNavigation, migrateLegacyNavigation } from './navigation'
+import { PlexBadge, plexPosterBadgeStyle } from './PlexBadge'
+
+
 
 const PAGE_SIZE = 24;
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
@@ -560,7 +563,10 @@ function App() {
               ) : (
                 shows.map(show => (
                   <div key={show.id} style={styles.mediaCard} onClick={() => handleSelectShow(show)}>
-                    <img src={show.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={show.title} style={styles.poster} />
+                    <div style={styles.posterWrapper}>
+                      <img src={show.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={show.title} style={styles.poster} />
+                      <PlexBadge inPlex={show.in_plex} size="small" style={plexPosterBadgeStyle} />
+                    </div>
                     <div style={styles.cardInfo}>
                       <h4 style={styles.cardTitle}>{show.title}</h4>
                       <p style={styles.cardOverview}>{show.overview ? show.overview.substring(0, 90) + '...' : 'No overview details captured.'}</p>
@@ -573,7 +579,10 @@ function App() {
             ) : (
               movies.map(movie => (
                 <div key={movie.id} style={styles.mediaCard} onClick={() => handleSelectMovie(movie)}>
-                  <img src={movie.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={movie.title} style={styles.poster} />
+                  <div style={styles.posterWrapper}>
+                    <img src={movie.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={movie.title} style={styles.poster} />
+                    <PlexBadge inPlex={movie.in_plex} size="small" style={plexPosterBadgeStyle} />
+                  </div>
                   <div style={styles.cardInfo}>
                     <h4 style={styles.cardTitle}>{movie.title}</h4>
                     <span style={styles.yearBadge}>{movie.release_date || movie.release_year || 'Unknown Year'}</span>
@@ -631,6 +640,7 @@ function App() {
               <h1 style={styles.mainTitle}>{selectedShow.title}</h1>
               <div style={styles.metaDatesRow}>
                 <span style={styles.metaStatusBadge}>{selectedShow.status}</span>
+                <PlexBadge inPlex={selectedShow.in_plex} />
               </div>
               <div style={styles.metaDatesRow}>
                 <span style={styles.metaDateItem}>
@@ -671,7 +681,10 @@ function App() {
                   <div key={pack.id} style={styles.packEntityCard}>
                     <div style={styles.packHeader}>
                       <h4 style={styles.entityCardTitle}>{pack.title}</h4>
-                      <span style={styles.packBadge}>Full Pack Release</span>
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <span style={styles.packBadge}>Full Pack Release</span>
+                        <PlexBadge inPlex={pack.in_plex} size="small" />
+                      </div>
                     </div>
                     <ScrapedEntriesDropdown itemId={pack.id} isSeasonPack={true} seasonNumber={pack.season_number} showId={selectedShow.id} />
                   </div>
@@ -694,6 +707,7 @@ function App() {
                     <div style={styles.epHeaderLayout}>
                       <span style={styles.epNumbering}>Episode {episode.episode_number}</span>
                       <h4 style={styles.episodeMainTitle}>{episode.title || `Episode ${episode.episode_number}`}</h4>
+                      <PlexBadge inPlex={episode.in_plex} size="small" />
                       {episode.air_date && <span style={styles.subText}>Aired: {episode.air_date}</span>}
                     </div>
                     {episode.overview && <p style={styles.epCardOverviewText}>{episode.overview}</p>}
@@ -730,6 +744,7 @@ const styles = {
   mediaGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '20px', marginTop: '8px', marginBottom: '8px' },
   mediaCard: { backgroundColor: '#fff', borderRadius: '8px', border: '1px solid #e9ecef', overflow: 'hidden', cursor: 'pointer', transition: 'transform 0.15s ease', boxShadow: '0 2px 4px rgba(0,0,0,0.02)' },
   poster: { width: '100%', height: '280px', objectFit: 'cover', backgroundColor: '#dee2e6' },
+  posterWrapper: { position: 'relative' },
   cardInfo: { padding: '12px' },
   cardTitle: { margin: '0 0 6px 0', fontSize: '0.9rem', fontWeight: '700', color: '#2c3e50', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   cardOverview: { margin: 0, fontSize: '0.75rem', color: '#6c757d', lineHeight: '1.4' },

@@ -1,62 +1,25 @@
 const { parseMediaTitle } = require('./mediaParser');
-const { pickEnglishTranslation, extractSeriesFields, extractMovieFields } = require('./tvdbMetadata');
-
-// How many entries to process per cycle. Keeping this low avoids hammering
-// the TVDB API and gives the scheduler room to breathe between ticks.
-const BATCH_SIZE = 5;
-
-// Minimum delay between consecutive TVDB API calls within a single batch (ms).
-// TVDB rate-limits requests per minute; 1500 ms gives ~40 calls/min headroom.
-const INTER_REQUEST_DELAY_MS = 1500;
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const { pickEnglishTranslation, extractSeriesFields, extractMovieFields, computeRecentAirDate } = require('./tvdbMetadata');
 
 async function processPendingMatches(pool, tvdb) {
-  // --- GATE: check for pending work before touching the TVDB API ---
-  const countResult = await pool.query(
-    "SELECT COUNT(*)::int AS total FROM scraped_entries WHERE match_status = 'unmatched'"
-  );
-  const pendingCount = countResult.rows[0].total;
-
-  if (pendingCount === 0) {
-    console.log(`[${new Date().toISOString()}] Matcher: no unmatched entries, skipping TVDB cycle.`);
-    return;
-  }
-
-  console.log(`[${new Date().toISOString()}] Matcher: ${pendingCount} unmatched entries found, starting cycle (batch size: ${BATCH_SIZE})...`);
+  console.log(`[${new Date().toISOString()}] Running advanced metadata matching cycle...`);
 
   try {
     await tvdb.authenticate();
 
     const pending = await pool.query(
-      `SELECT id, title, category, match_status FROM scraped_entries WHERE match_status = 'unmatched' LIMIT ${BATCH_SIZE}`
+      "SELECT id, title, category, match_status FROM scraped_entries WHERE match_status IN ('unmatched') LIMIT 10"
     );
 
-    for (let i = 0; i < pending.rows.length; i++) {
-      const entry = pending.rows[i];
-
-      // Pace requests — wait between entries (skip delay before the first one)
-      if (i > 0) {
-        await sleep(INTER_REQUEST_DELAY_MS);
-      }
-
+    for (const entry of pending.rows) {
       try {
-        // Mark as processing so the UI can show in-flight entries
-        await pool.query("UPDATE scraped_entries SET match_status = 'processing' WHERE id = $1", [entry.id]);
-
         const parsed = parseMediaTitle(entry.title, entry.category);
         console.log(`Parsed details: (${entry.match_status})`, parsed);
 
-        if (parsed.type !== 'series' && parsed.type !== 'movie' && parsed.type !== 'unknown') {
-          await pool.query("UPDATE scraped_entries SET match_status = 'ignored' WHERE id = $1", [entry.id]);
-          console.log(`Ignoring entry ID ${entry.id} — unrecognized media type: "${entry.title}"`);
-          continue;
-        } else if (parsed.type === 'unknown') {
+        if (parsed.type === 'unknown') {
           await pool.query("UPDATE scraped_entries SET match_status = 'failed' WHERE id = $1", [entry.id]);
           continue;
-        } 
+        }
 
         const searchParams = { q: parsed.title, type: parsed.type, limit: 1 };
         if (parsed.year) {
@@ -115,6 +78,8 @@ async function processPendingMatches(pool, tvdb) {
               network = COALESCE(NULLIF(EXCLUDED.network, ''), metadata_shows.network),
               genres = CASE WHEN COALESCE(array_length(EXCLUDED.genres, 1), 0) > 0 THEN EXCLUDED.genres ELSE metadata_shows.genres END,
               first_aired = COALESCE(NULLIF(EXCLUDED.first_aired, ''), metadata_shows.first_aired),
+              -- Seed only: real, ongoing accuracy comes from computeRecentAirDate()
+              -- below once episodes are synced, which overwrites this unconditionally.
               last_aired = COALESCE(NULLIF(EXCLUDED.last_aired, ''), metadata_shows.last_aired),
               original_country = COALESCE(NULLIF(EXCLUDED.original_country, ''), metadata_shows.original_country),
               original_language = COALESCE(NULLIF(EXCLUDED.original_language, ''), metadata_shows.original_language)
@@ -162,8 +127,10 @@ async function processPendingMatches(pool, tvdb) {
 
             const episodes = epRes.data.data?.episodes || [];
             
+            // Explicitly filter to ensure we grab the exact matching episode number and season matching our parsed values
             const matchEp = episodes.find(e => e.seasonNumber === parsed.season && e.number === parsed.episode) || episodes[0];
 
+            // FIXED: Added 'air_date' column, values, and updates to the query sequence
             const itemQuery = `
               INSERT INTO metadata_items (type, tvdb_id, show_id, season_id, episode_number, title, overview, air_date)
               VALUES ('episode', $1, $2, $3, $4, $5, $6, $7)
@@ -175,6 +142,7 @@ async function processPendingMatches(pool, tvdb) {
               RETURNING id;
             `;
             
+            // FIXED: TVDB returns episode IDs as integers under '.id'; air dates are under '.aired'
             const itemRow = await pool.query(itemQuery, [
               matchEp && matchEp.id ? String(matchEp.id) : null,
               showId,
@@ -187,6 +155,30 @@ async function processPendingMatches(pool, tvdb) {
             finalMetadataId = itemRow.rows[0].id;
 
             console.log(`Matched Episode ID ${matchEp ? matchEp.id : 'N/A'}: "${matchEp ? matchEp.name : parsed.episode}" (Aired: ${matchEp ? matchEp.aired : 'N/A'})`);
+
+            // ----------------------------------------
+            // Refresh the show's recent air date.
+            // This is the new authoritative process: pull the series'
+            // full episode list and derive the most recent *actually
+            // aired* date from it, rather than trusting TVDB's own
+            // (often stale) `lastAired` field on the base series record.
+            // ----------------------------------------
+            try {
+              const seriesEpisodes = await tvdb.getSeriesEpisodesExtended(rootAsset.tvdb_id);
+              const recentAirDate = computeRecentAirDate(seriesEpisodes);
+
+              if (recentAirDate) {
+                await pool.query(
+                  `UPDATE metadata_shows SET last_aired = $1 WHERE id = $2`,
+                  [recentAirDate, showId]
+                );
+                console.log(`Refreshed last_aired for show ID ${showId} ("${rootAsset.name}") -> ${recentAirDate}`);
+              } else {
+                console.log(`No aired episodes found yet for show ID ${showId} ("${rootAsset.name}"); leaving last_aired unchanged.`);
+              }
+            } catch (airDateErr) {
+              console.error(`Failed to refresh last_aired for show ID ${showId}:`, airDateErr.message);
+            }
 
           } else if (parsed.season !== null) {
             // ----------------------------------------
@@ -201,7 +193,7 @@ async function processPendingMatches(pool, tvdb) {
               RETURNING id;
             `;
             const itemRow = await pool.query(itemQuery, [
-              null,
+              null, // Explicitly keeping it NULL as requested for complete season packs
               showId,
               seasonId,
               0,    

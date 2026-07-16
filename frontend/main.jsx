@@ -4,11 +4,34 @@ import AdminDashboard from './dashboard'
 import { fetchJson } from './apiClient'
 import { readNavigation, writeNavigation, migrateLegacyNavigation } from './navigation'
 import { PlexBadge, plexPosterBadgeStyle } from './PlexBadge'
+import { ResolutionBadge } from './ResolutionBadge'
 
 
 
 const PAGE_SIZE = 24;
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+
+// ISO 639-2/B language codes as returned by TVDB's `originalLanguage` field.
+// Falls back to the raw (uppercased) code for anything not in this table.
+const LANGUAGE_NAMES = {
+  eng: 'English', spa: 'Spanish', fra: 'French', fre: 'French', deu: 'German', ger: 'German',
+  ita: 'Italian', jpn: 'Japanese', kor: 'Korean', zho: 'Chinese', chi: 'Chinese', cmn: 'Mandarin',
+  rus: 'Russian', por: 'Portuguese', ara: 'Arabic', hin: 'Hindi', nld: 'Dutch', dut: 'Dutch',
+  swe: 'Swedish', nor: 'Norwegian', dan: 'Danish', fin: 'Finnish', pol: 'Polish',
+  tur: 'Turkish', tha: 'Thai', vie: 'Vietnamese', ces: 'Czech', cze: 'Czech',
+  ell: 'Greek', gre: 'Greek', heb: 'Hebrew', ind: 'Indonesian', ukr: 'Ukrainian',
+  hun: 'Hungarian', ron: 'Romanian', rum: 'Romanian', bul: 'Bulgarian', hrv: 'Croatian',
+  srp: 'Serbian', slk: 'Slovak', slo: 'Slovak', slv: 'Slovenian', lit: 'Lithuanian',
+  lav: 'Latvian', est: 'Estonian', isl: 'Icelandic', cat: 'Catalan', fil: 'Filipino',
+  may: 'Malay', msa: 'Malay', ben: 'Bengali', urd: 'Urdu', fas: 'Persian', per: 'Persian',
+};
+
+function formatLanguage(code) {
+  if (!code) return null;
+  const key = code.toLowerCase().trim();
+  if (!key) return null;
+  return LANGUAGE_NAMES[key] || code.toUpperCase();
+}
 
 const DEFAULT_LIBRARY_FILTERS = {
   search: '',
@@ -202,7 +225,7 @@ function ScrapedEntriesDropdown({ itemId, movieId = null, isSeasonPack = false, 
         } else if (isSeasonPack) {
           url = `/api/media/shows/${showId}/seasons/${seasonNumber}/pack-entries`;
         }
-        
+
         const data = await fetchJson(url);
         setEntries(data.entries || []);
         setFetchError(null);
@@ -221,7 +244,7 @@ function ScrapedEntriesDropdown({ itemId, movieId = null, isSeasonPack = false, 
       <button style={styles.expandBtn} onClick={toggleExpand}>
         {expanded ? '▲ Hide Stream Source Items' : '▼ View Available Source Links'}
       </button>
-      
+
       {expanded && (
         <div style={styles.entriesPanel}>
           {loading ? (
@@ -237,6 +260,7 @@ function ScrapedEntriesDropdown({ itemId, movieId = null, isSeasonPack = false, 
                   <strong style={styles.entryTitle}>{entry.title}</strong>
                   <div style={styles.metaRow}>
                     <span style={styles.badge}>{entry.category || 'N/A'}</span>
+                    <ResolutionBadge title={entry.title} size="small" />
                     <a href={entry.magnet_link} style={styles.magnetLink}>Download Magnet</a>
                     <span style={styles.subText}>Harvested: {new Date(entry.date_scraped).toLocaleDateString()}</span>
                   </div>
@@ -552,14 +576,14 @@ function App() {
         <div>
           {libraryError && <div style={styles.errorBanner}>{libraryError}</div>}
           <div style={styles.typeToggleBar}>
-            <button 
-              style={mediaType === 'series' ? styles.toggleActive : styles.toggleInactive} 
+            <button
+              style={mediaType === 'series' ? styles.toggleActive : styles.toggleInactive}
               onClick={() => setLibraryMediaType('series')}
             >
               TV Shows ({totalCounts.series})
             </button>
-            <button 
-              style={mediaType === 'movie' ? styles.toggleActive : styles.toggleInactive} 
+            <button
+              style={mediaType === 'movie' ? styles.toggleActive : styles.toggleInactive}
               onClick={() => setLibraryMediaType('movie')}
             >
               Movies ({totalCounts.movie})
@@ -637,9 +661,23 @@ function App() {
             <img src={selectedMovie.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={selectedMovie.title} style={styles.largePoster} />
             <div style={styles.heroMeta}>
               <h1 style={styles.mainTitle}>{selectedMovie.title}</h1>
-              <div style={{ marginBottom: '15px' }}><span style={styles.yearBadge}>Movie Entity</span> | <strong>Released:</strong> {selectedMovie.release_date || 'N/A'}</div>
+              <div style={styles.metaDatesRow}>
+                <span style={styles.yearBadge}>Movie Entity</span>
+                <PlexBadge inPlex={selectedMovie.in_plex} />
+              </div>
+              <div style={styles.metaDatesRow}>
+                <span style={styles.metaDateItem}>
+                  <strong>Released:</strong> {selectedMovie.release_date || (selectedMovie.release_year ? String(selectedMovie.release_year) : 'Unknown')}
+                </span>
+                <span style={styles.metaDateItem}>
+                  <strong>Genre:</strong> {selectedMovie.genres && selectedMovie.genres.length ? selectedMovie.genres.join(', ') : 'Unknown'}
+                </span>
+                <span style={styles.metaDateItem}>
+                  <strong>Language:</strong> {formatLanguage(selectedMovie.original_language) || 'Unknown'}
+                </span>
+              </div>
               <p style={styles.descriptionText}>{selectedMovie.overview || 'No overview summary logged.'}</p>
-              
+
               <div style={styles.ingestionBox}>
                 <h3 style={styles.sectionHeading}>Linked Index Entries</h3>
                 <p style={styles.subText}>Scraped targets bound to this unique movie profile:</p>
@@ -655,7 +693,7 @@ function App() {
         <div style={styles.detailContainer}>
           <button style={styles.backBtn} onClick={goToLibrary}>← Back to Library</button>
           {showDetailError && <div style={styles.errorBanner}>{showDetailError}</div>}
-          
+
           <div style={styles.heroRow}>
             <img src={selectedShow.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={selectedShow.title} style={styles.largePoster} />
             <div style={styles.heroMeta}>
@@ -672,6 +710,14 @@ function App() {
                   <strong>Last Published:</strong> {formatDateOnly(selectedShow.latest_published)}
                 </span>
               </div>
+              <div style={styles.metaDatesRow}>
+                <span style={styles.metaDateItem}>
+                  <strong>Genre:</strong> {selectedShow.genres && selectedShow.genres.length ? selectedShow.genres.join(', ') : 'Unknown'}
+                </span>
+                <span style={styles.metaDateItem}>
+                  <strong>Language:</strong> {formatLanguage(selectedShow.original_language) || 'Unknown'}
+                </span>
+              </div>
               <p style={styles.descriptionText}>{selectedShow.overview || 'No structural show breakdown summary listed.'}</p>
             </div>
           </div>
@@ -681,8 +727,8 @@ function App() {
             <h3 style={styles.rowLabelTitle}>Season Selector Filter Focus</h3>
             <div style={styles.seasonSelectorContainer}>
               {showSeasons.map(s => (
-                <button 
-                  key={s.id} 
+                <button
+                  key={s.id}
                   style={activeSeasonFilter === s.season_number ? styles.seasonSelectBtnActive : styles.seasonSelectBtn}
                   onClick={() => handleSeasonFilterChange(s.season_number)}
                 >

@@ -35,7 +35,10 @@ function registerPlexRoutes(app, pool) {
     try {
       const summary = await syncPlexFlags(pool);
       if (summary.skipped) {
-        return res.status(400).json({ success: false, ...summary });
+        // `error` mirrors what errors.js/fetchJson expects so the frontend's
+        // generic error-toast handling surfaces the real reason instead of
+        // a bare "Request failed (400)".
+        return res.status(400).json({ success: false, error: summary.reason, ...summary });
       }
       res.json({ success: true, ...summary });
     } catch (error) {

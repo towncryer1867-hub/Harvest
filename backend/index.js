@@ -48,6 +48,7 @@ app.get('/api/media/movies', async (req, res) => {
         release_year: req.query.release_year || '',
         original_country: req.query.original_country || '',
         original_language: req.query.original_language || '',
+        in_plex: req.query.in_plex || '',
       },
     });
 
@@ -126,6 +127,7 @@ app.get('/api/media/shows', async (req, res) => {
         first_aired_year: req.query.first_aired_year || '',
         original_country: req.query.original_country || '',
         original_language: req.query.original_language || '',
+        in_plex: req.query.in_plex || '',
       },
     });
 

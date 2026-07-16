@@ -12,8 +12,8 @@ const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 
 const DEFAULT_LIBRARY_FILTERS = {
   search: '',
-  sort: 'release_date',
-  order: 'desc',
+  sort: 'title',
+  order: 'asc',
   letter: '',
   network: '',
   genre: '',
@@ -24,6 +24,7 @@ const DEFAULT_LIBRARY_FILTERS = {
   release_year: '',
   original_country: '',
   original_language: '',
+  in_plex: '',
   page: 1,
 };
 
@@ -131,6 +132,7 @@ function LibraryToolbar({
         )}
         <FilterSelect label="Country" value={filters.original_country} options={filterOptions.original_countries || []} onChange={(v) => onFilterChange({ original_country: v, page: 1 })} />
         <FilterSelect label="Language" value={filters.original_language} options={filterOptions.original_languages || []} onChange={(v) => onFilterChange({ original_language: v, page: 1 })} />
+        <PlexFilterSelect value={filters.in_plex} onChange={(v) => onFilterChange({ in_plex: v, page: 1 })} />
       </div>
 
       <div style={styles.paginationBar}>
@@ -159,6 +161,25 @@ function FilterSelect({ label, value, options, onChange }) {
         <option value="">Any</option>
         {options.map((opt) => (
           <option key={opt} value={String(opt)}>{opt}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+const PLEX_FILTER_OPTIONS = [
+  { value: 'true', label: 'In Plex' },
+  { value: 'false', label: 'Missing from Plex' },
+];
+
+function PlexFilterSelect({ value, onChange }) {
+  return (
+    <label style={styles.filterSelectLabel}>
+      <span style={styles.filterSelectText}>Plex Status</span>
+      <select style={styles.toolbarSelect} value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">Any</option>
+        {PLEX_FILTER_OPTIONS.map((opt) => (
+          <option key={opt.value} value={opt.value}>{opt.label}</option>
         ))}
       </select>
     </label>
@@ -300,6 +321,7 @@ function App() {
         release_year: filters.release_year,
         original_country: filters.original_country,
         original_language: filters.original_language,
+        in_plex: filters.in_plex,
       });
 
       if (type === 'series') {

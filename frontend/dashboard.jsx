@@ -43,6 +43,8 @@ function App() {
     }, null, 2)
   );
   const [statusMessage, setStatusMessage] = useState('');
+  const [plexSyncResult, setPlexSyncResult] = useState(null);
+  const [plexSyncing, setPlexSyncing] = useState(false);
   const [fetchError, setFetchError] = useState(null);
 
   const fetchEntries = useCallback(async (pageNum, status) => {
@@ -178,6 +180,21 @@ function App() {
       }
     } catch (err) {
       setStatusMessage(`Sync error: ${err.message}`);
+    }
+  };
+
+  const handlePlexSync = async () => {
+    setPlexSyncing(true);
+    setPlexSyncResult(null);
+    try {
+      setStatusMessage('Cross-referencing catalog against Plex library...');
+      const data = await fetchJson('/api/admin/plex-sync', { method: 'POST' });
+      setPlexSyncResult(data);
+      setStatusMessage('Plex sync complete!');
+    } catch (err) {
+      setStatusMessage(`Plex sync error: ${err.message}`);
+    } finally {
+      setPlexSyncing(false);
     }
   };
 
@@ -501,13 +518,78 @@ function App() {
           </div>
         )}
 
-        {activeTab === 'admin' && (
+{activeTab === 'admin' && (
           <div style={styles.formCard}>
             <h2 style={styles.sectionHeaderTitle}>Daemon Engineering Overrides</h2>
             <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: '20px' }}>
               Force immediate parsing execution over all items flagged inside the unresolved queue table cache.
             </p>
             <button style={styles.forceSyncBtn} onClick={handleForceSync}>Trigger Complete Pipeline Match Cycle</button>
+
+            <hr style={{ margin: '28px 0', border: 'none', borderTop: '1px solid #dee2e6' }} />
+
+            <h2 style={styles.sectionHeaderTitle}>Plex Library Sync</h2>
+            <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: '20px' }}>
+              Cross-references your matched shows, movies, episodes, and season packs against your Plex
+              server and updates their "In Plex" status. Runs automatically nowhere else — trigger it here
+              after adding new content to Plex, or after changing PLEX_SERVER_URL / PLEX_TOKEN.
+            </p>
+            <button
+              style={styles.forceSyncBtn}
+              onClick={handlePlexSync}
+              disabled={plexSyncing}
+            >
+              {plexSyncing ? 'Syncing with Plex...' : 'Run Plex Sync Now'}
+            </button>
+
+            {plexSyncResult && (
+              <div style={styles.plexSyncResultBox}>
+                {plexSyncResult.success === false ? (
+                  <p style={{ color: '#dc3545', margin: 0 }}>
+                    Sync did not run: {plexSyncResult.error || plexSyncResult.reason || 'Unknown reason'}
+                  </p>
+                ) : (
+                  <>
+                    <div style={styles.plexSyncResultGrid}>
+                      <div>
+                        <span style={styles.plexSyncResultLabel}>Shows</span>
+                        <span style={styles.plexSyncResultValue}>
+                          {plexSyncResult.shows_matched} / {plexSyncResult.shows_checked}
+                        </span>
+                      </div>
+                      <div>
+                        <span style={styles.plexSyncResultLabel}>Movies</span>
+                        <span style={styles.plexSyncResultValue}>
+                          {plexSyncResult.movies_matched} / {plexSyncResult.movies_checked}
+                        </span>
+                      </div>
+                      <div>
+                        <span style={styles.plexSyncResultLabel}>Episodes</span>
+                        <span style={styles.plexSyncResultValue}>
+                          {plexSyncResult.episodes_matched} / {plexSyncResult.episodes_checked}
+                        </span>
+                      </div>
+                      <div>
+                        <span style={styles.plexSyncResultLabel}>Season Packs</span>
+                        <span style={styles.plexSyncResultValue}>
+                          {plexSyncResult.season_packs_matched} / {plexSyncResult.season_packs_checked}
+                        </span>
+                      </div>
+                    </div>
+                    {plexSyncResult.errors && plexSyncResult.errors.length > 0 && (
+                      <div style={{ marginTop: '14px' }}>
+                        <p style={{ color: '#dc3545', fontWeight: 600, margin: '0 0 6px 0', fontSize: '0.85rem' }}>
+                          {plexSyncResult.errors.length} warning(s) during sync:
+                        </p>
+                        <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '0.8rem', color: '#666' }}>
+                          {plexSyncResult.errors.map((e, i) => <li key={i}>{e}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </div>
         )}
       </main>
@@ -557,6 +639,10 @@ const styles = {
   statusToast: { padding: '12px 16px', backgroundColor: '#e2e3e5', color: '#383d41', borderRadius: '6px', fontSize: '0.85rem', fontWeight: '500', marginBottom: '20px', border: '1px solid #d6d8db' },
   errorBanner: { padding: '12px 16px', backgroundColor: '#f8d7da', color: '#842029', borderRadius: '6px', fontSize: '0.85rem', fontWeight: '500', marginBottom: '20px', border: '1px solid #f5c2c7' },
   forceSyncBtn: { padding: '10px 20px', backgroundColor: '#198754', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: '600', cursor: 'pointer' },
+  plexSyncResultBox: { marginTop: '18px', padding: '16px', backgroundColor: '#f8f9fa', border: '1px solid #dee2e6', borderRadius: '6px' },
+  plexSyncResultGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '16px' },
+  plexSyncResultLabel: { display: 'block', fontSize: '0.75rem', color: '#666', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' },
+  plexSyncResultValue: { display: 'block', fontSize: '1.3rem', fontWeight: 700, color: '#212529' },
   filterRow: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '15px', backgroundColor: '#fff', padding: '10px', borderRadius: '8px', border: '1px solid #e9ecef' },
   filterLabel: { fontSize: '0.85rem', fontWeight: 'bold', color: '#495057' },
   filterDropdown: { flex: 1, padding: '6px 10px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.85rem', backgroundColor: '#ffffff', cursor: 'pointer' },

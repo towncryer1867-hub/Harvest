@@ -51,6 +51,20 @@ function appendYearFilter(conditions, params, year, column) {
   conditions.push(`${column} = $${params.length}`);
 }
 
+/**
+ * Filters on the in_plex boolean column. Accepts:
+ *   'true'  -> only items found in Plex
+ *   'false' -> only items confirmed NOT in Plex (synced, but missing)
+ *   ''/undefined -> no filter (default)
+ * Anything else is ignored rather than throwing, so a bad query param
+ * degrades to "no filter" instead of a 500.
+ */
+function appendPlexFilter(conditions, params, value, column) {
+  if (value !== 'true' && value !== 'false') return;
+  params.push(value === 'true');
+  conditions.push(`${column} = $${params.length}`);
+}
+
 function seriesSortColumn(sort) {
   if (sort === 'release_date') return 's.last_aired';
   if (sort === 'published_date') return 'pub.latest_published';
@@ -82,6 +96,7 @@ function buildSeriesQuery(options) {
   }
   appendExactFilter(conditions, params, filters.original_country, 's.original_country');
   appendExactFilter(conditions, params, filters.original_language, 's.original_language');
+  appendPlexFilter(conditions, params, filters.in_plex, 's.in_plex');
 
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const sortCol = seriesSortColumn(sort);
@@ -140,6 +155,7 @@ function buildMoviesQuery(options) {
   appendYearFilter(conditions, params, filters.release_year, 'm.release_year');
   appendExactFilter(conditions, params, filters.original_country, 'm.original_country');
   appendExactFilter(conditions, params, filters.original_language, 'm.original_language');
+  appendPlexFilter(conditions, params, filters.in_plex, 'm.in_plex');
 
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const sortCol = movieSortColumn(sort);

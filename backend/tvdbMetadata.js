@@ -36,6 +36,31 @@ function parseYear(value) {
   return match ? parseInt(match[0], 10) : null;
 }
 
+/**
+ * TVDB's `extended` records include a `trailers` array (when populated) of
+ * { id, name, url, runtime, language }. We only ever surface the first one.
+ * Returns null when there are none, so downstream code (and the UI) can
+ * treat "no trailer" consistently.
+ */
+function firstTrailerUrl(trailers) {
+  if (!Array.isArray(trailers) || trailers.length === 0) return null;
+  const first = trailers[0];
+  return first?.url || null;
+}
+
+/**
+ * TVDB's `extended` records include a `remoteIds` array of
+ * { id, type, sourceName, sourceId } linking out to IMDB, TheMovieDB,
+ * official sites, social accounts, etc. We only care about the IMDB entry
+ * here (its `id` is the raw IMDB id, e.g. "tt1234567"). Returns null if
+ * TVDB doesn't have an IMDB cross-reference for this title.
+ */
+function findImdbId(remoteIds) {
+  if (!Array.isArray(remoteIds)) return null;
+  const match = remoteIds.find((r) => (r?.sourceName || '').toLowerCase() === 'imdb');
+  return match?.id || null;
+}
+
 function extractSeriesFields(extended, englishTranslation) {
   const network =
     extended?.originalNetwork?.name ||
@@ -58,6 +83,8 @@ function extractSeriesFields(extended, englishTranslation) {
     last_aired: extended?.lastAired || null,
     original_country: extended?.originalCountry || extended?.country || null,
     original_language: extended?.originalLanguage || null,
+    trailer_url: firstTrailerUrl(extended?.trailers),
+    imdb_id: findImdbId(extended?.remoteIds),
   };
 }
 
@@ -82,6 +109,8 @@ function extractMovieFields(extended, englishTranslation) {
     production_companies: [...new Set(productionCompanies)],
     original_country: extended?.originalCountry || null,
     original_language: extended?.originalLanguage || null,
+    trailer_url: firstTrailerUrl(extended?.trailers),
+    imdb_id: findImdbId(extended?.remoteIds),
   };
 }
 

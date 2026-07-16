@@ -62,14 +62,17 @@ async function processPendingMatches(pool, tvdb) {
                 last_aired: null,
                 original_country: null,
                 original_language: null,
+                trailer_url: null,
+                imdb_id: null,
               };
 
           const showQuery = `
             INSERT INTO metadata_shows (
               tvdb_id, title, overview, poster_path, status, network, genres,
-              first_aired, last_aired, original_country, original_language
+              first_aired, last_aired, original_country, original_language,
+              trailer_url, imdb_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (tvdb_id) DO UPDATE SET
               title = EXCLUDED.title,
               overview = COALESCE(NULLIF(EXCLUDED.overview, ''), metadata_shows.overview),
@@ -82,7 +85,9 @@ async function processPendingMatches(pool, tvdb) {
               -- below once episodes are synced, which overwrites this unconditionally.
               last_aired = COALESCE(NULLIF(EXCLUDED.last_aired, ''), metadata_shows.last_aired),
               original_country = COALESCE(NULLIF(EXCLUDED.original_country, ''), metadata_shows.original_country),
-              original_language = COALESCE(NULLIF(EXCLUDED.original_language, ''), metadata_shows.original_language)
+              original_language = COALESCE(NULLIF(EXCLUDED.original_language, ''), metadata_shows.original_language),
+              trailer_url = COALESCE(NULLIF(EXCLUDED.trailer_url, ''), metadata_shows.trailer_url),
+              imdb_id = COALESCE(NULLIF(EXCLUDED.imdb_id, ''), metadata_shows.imdb_id)
             RETURNING id;
           `;
           const showRow = await pool.query(showQuery, [
@@ -97,6 +102,8 @@ async function processPendingMatches(pool, tvdb) {
             seriesMeta.last_aired,
             seriesMeta.original_country,
             seriesMeta.original_language,
+            seriesMeta.trailer_url,
+            seriesMeta.imdb_id,
           ]);
           const showId = showRow.rows[0].id;
 
@@ -118,7 +125,7 @@ async function processPendingMatches(pool, tvdb) {
             // CASE A.1: SINGLE EPISODE MATCHING
             // ----------------------------------------
             console.log(`Found Series: "${rootAsset.name}" (ID: ${rootAsset.tvdb_id}). Fetching S${parsed.season}E${parsed.episode}...`);
-            
+
             const epUrl = `${tvdb.baseUrl}/series/${rootAsset.tvdb_id}/episodes/default`;
             const epRes = await require('axios').get(epUrl, {
               headers: tvdb.getHeaders(),
@@ -126,7 +133,7 @@ async function processPendingMatches(pool, tvdb) {
             });
 
             const episodes = epRes.data.data?.episodes || [];
-            
+
             // Explicitly filter to ensure we grab the exact matching episode number and season matching our parsed values
             const matchEp = episodes.find(e => e.seasonNumber === parsed.season && e.number === parsed.episode) || episodes[0];
 
@@ -141,7 +148,7 @@ async function processPendingMatches(pool, tvdb) {
                 tvdb_id = COALESCE(NULLIF(EXCLUDED.tvdb_id, ''), metadata_items.tvdb_id)
               RETURNING id;
             `;
-            
+
             // FIXED: TVDB returns episode IDs as integers under '.id'; air dates are under '.aired'
             const itemRow = await pool.query(itemQuery, [
               matchEp && matchEp.id ? String(matchEp.id) : null,
@@ -185,7 +192,7 @@ async function processPendingMatches(pool, tvdb) {
             // CASE A.2: SEASON PACK MATCHING
             // ----------------------------------------
             console.log(`Found Series Pack: "${rootAsset.name}" (ID: ${rootAsset.tvdb_id}).`);
-            
+
             const itemQuery = `
               INSERT INTO metadata_items (type, tvdb_id, show_id, season_id, episode_number, title, overview, air_date)
               VALUES ('season_pack', $1, $2, $3, $4, $5, $6, $7)
@@ -196,7 +203,7 @@ async function processPendingMatches(pool, tvdb) {
               null, // Explicitly keeping it NULL as requested for complete season packs
               showId,
               seasonId,
-              0,    
+              0,
               `Season ${parsed.season} Pack`,
               `Full season pack release for Season ${parsed.season}`,
               null
@@ -206,7 +213,7 @@ async function processPendingMatches(pool, tvdb) {
             console.log(`Matched Season Pack: "${parsed.season}"`);
           }
 
-        } 
+        }
         // ==========================================
         // CASE B: IT'S A MOVIE
         // ==========================================
@@ -230,14 +237,17 @@ async function processPendingMatches(pool, tvdb) {
                 production_companies: [],
                 original_country: null,
                 original_language: null,
+                trailer_url: null,
+                imdb_id: null,
               };
 
           const movieProfileQuery = `
             INSERT INTO metadata_movies (
               tvdb_id, title, overview, poster_path, release_date, release_year,
-              genres, studios, production_companies, original_country, original_language
+              genres, studios, production_companies, original_country, original_language,
+              trailer_url, imdb_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (tvdb_id) DO UPDATE SET
               title = EXCLUDED.title,
               overview = COALESCE(NULLIF(EXCLUDED.overview, ''), metadata_movies.overview),
@@ -248,7 +258,9 @@ async function processPendingMatches(pool, tvdb) {
               studios = CASE WHEN COALESCE(array_length(EXCLUDED.studios, 1), 0) > 0 THEN EXCLUDED.studios ELSE metadata_movies.studios END,
               production_companies = CASE WHEN COALESCE(array_length(EXCLUDED.production_companies, 1), 0) > 0 THEN EXCLUDED.production_companies ELSE metadata_movies.production_companies END,
               original_country = COALESCE(NULLIF(EXCLUDED.original_country, ''), metadata_movies.original_country),
-              original_language = COALESCE(NULLIF(EXCLUDED.original_language, ''), metadata_movies.original_language)
+              original_language = COALESCE(NULLIF(EXCLUDED.original_language, ''), metadata_movies.original_language),
+              trailer_url = COALESCE(NULLIF(EXCLUDED.trailer_url, ''), metadata_movies.trailer_url),
+              imdb_id = COALESCE(NULLIF(EXCLUDED.imdb_id, ''), metadata_movies.imdb_id)
             RETURNING id;
           `;
           const movieProfileRow = await pool.query(movieProfileQuery, [
@@ -263,6 +275,8 @@ async function processPendingMatches(pool, tvdb) {
             movieMeta.production_companies,
             movieMeta.original_country,
             movieMeta.original_language,
+            movieMeta.trailer_url,
+            movieMeta.imdb_id,
           ]);
           const movieId = movieProfileRow.rows[0].id;
 

@@ -16,8 +16,8 @@ function App() {
   const [adminData, setAdminData] = useState({ stats: { matched: 0, unmatched: 0, failed: 0, ignored: 0, processing: 0 }, failed_items: [] });
   const [loading, setLoading] = useState(true);
   const [entriesLoading, setEntriesLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState('feed'); 
-  const [manualIds, setManualIds] = useState({}); 
+  const [activeTab, setActiveTab] = useState('feed');
+  const [manualIds, setManualIds] = useState({});
   const [statusFilter, setStatusFilter] = useState('all');
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ page: 1, limit: PAGE_SIZE, total: 0, total_pages: 1 });
@@ -38,7 +38,8 @@ function App() {
         date_published: "pubDate",
         category: "category",
         description: "description",
-        magnet_link: "enclosure"
+        magnet_link: "enclosure",
+        size: "size"
       }
     }, null, 2)
   );
@@ -128,7 +129,7 @@ function App() {
     setIsActive(true);
     setConfigString(JSON.stringify({
       parser: "xml",
-      selectors: { item: "item", title: "title", source_link: "link", date_published: "pubDate", category: "category", description: "description", magnet_link: "enclosure" }
+      selectors: { item: "item", title: "title", source_link: "link", date_published: "pubDate", category: "category", description: "description", magnet_link: "enclosure", size: "size" }
     }, null, 2));
   };
 
@@ -388,12 +389,12 @@ function App() {
                         {entry.match_status !== 'matched' && entry.match_status !== 'ignored' && entry.match_status !== 'processing' && (
                           <div style={styles.actionColumnWrapper}>
                             <div style={styles.manualMatchWrapper}>
-                              <input 
-                                type="text" 
-                                placeholder="TVDB ID" 
-                                style={styles.manualInput} 
-                                value={manualIds[entry.id] || ''} 
-                                onChange={(e) => setManualIds({ ...manualIds, [entry.id]: e.target.value })} 
+                              <input
+                                type="text"
+                                placeholder="TVDB ID"
+                                style={styles.manualInput}
+                                value={manualIds[entry.id] || ''}
+                                onChange={(e) => setManualIds({ ...manualIds, [entry.id]: e.target.value })}
                               />
                               <button style={styles.manualSubmitBtn} onClick={() => handleManualMatchSubmit(entry.id)}>Link</button>
                             </div>
@@ -406,8 +407,8 @@ function App() {
                                 Retry
                               </button>
                             )}
-                            <button 
-                              style={styles.ignoreBtn} 
+                            <button
+                              style={styles.ignoreBtn}
                               onClick={() => handleIgnoreEntry(entry.id)}
                               title="Ignore item permanently"
                             >

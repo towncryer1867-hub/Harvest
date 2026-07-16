@@ -29,7 +29,13 @@ CREATE TABLE IF NOT EXISTS metadata_shows (
     -- Plex cross-reference (see plexSync.js)
     in_plex BOOLEAN NOT NULL DEFAULT FALSE,
     plex_rating_key VARCHAR(50),
-    plex_checked_at TIMESTAMP WITH TIME ZONE
+    plex_checked_at TIMESTAMP WITH TIME ZONE,
+    -- Extra TVDB metadata (see tvdbMetadata.js): first trailer TVDB has on
+    -- file (nullable — not every title has one) and the IMDB id from
+    -- TVDB's remoteIds (nullable). TheTVDB's own link is derived from
+    -- tvdb_id at render time, so it doesn't need a column.
+    trailer_url TEXT,
+    imdb_id VARCHAR(20)
 );
 
 -- 3. New Table: Season Containers
@@ -60,7 +66,11 @@ CREATE TABLE IF NOT EXISTS metadata_movies (
     -- Plex cross-reference (see plexSync.js)
     in_plex BOOLEAN NOT NULL DEFAULT FALSE,
     plex_rating_key VARCHAR(50),
-    plex_checked_at TIMESTAMP WITH TIME ZONE
+    plex_checked_at TIMESTAMP WITH TIME ZONE,
+    -- Extra TVDB metadata (see tvdbMetadata.js) — see matching comment on
+    -- metadata_shows above.
+    trailer_url TEXT,
+    imdb_id VARCHAR(20)
 );
 
 -- 5. Universal Media Units (Episodes, Movies, Season Packs)
@@ -99,17 +109,31 @@ CREATE TABLE IF NOT EXISTS scraped_entries (
     category VARCHAR(255),
     description TEXT,
     magnet_link TEXT,
+    size VARCHAR(50), -- Human-readable size straight from the source feed (e.g. "1.4 GB")
     date_published TIMESTAMP WITH TIME ZONE,
     date_scraped TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     match_status VARCHAR(20) DEFAULT 'unmatched' -- 'unmatched', 'matched', 'failed', 'processing', 'ignored'
 );
 
+-- Idempotent safety net: if this script is ever re-run against a database
+-- that already has the scraped_entries table from before the `size` column
+-- existed, this adds it without erroring. (Note: on a live deployment,
+-- Postgres only auto-runs this file once against an empty data volume --
+-- see docker-compose.yml's db-init mount -- so the actual migration for
+-- already-running installs happens at backend startup via db.js's
+-- ensureSchema(), not here.)
+ALTER TABLE scraped_entries ADD COLUMN IF NOT EXISTS size VARCHAR(50);
+ALTER TABLE metadata_shows ADD COLUMN IF NOT EXISTS trailer_url TEXT;
+ALTER TABLE metadata_shows ADD COLUMN IF NOT EXISTS imdb_id VARCHAR(20);
+ALTER TABLE metadata_movies ADD COLUMN IF NOT EXISTS trailer_url TEXT;
+ALTER TABLE metadata_movies ADD COLUMN IF NOT EXISTS imdb_id VARCHAR(20);
+
 -- 7. Seed Initial Data: Add LimeTorrents as our first source
 INSERT INTO scrape_sources (name, url, interval_minutes, config_mapping)
 VALUES (
-    'LimeTorrents - TV: Upload', 
-    'https://www.limetorrents.fun/searchrss/Upload/', 
-    30, 
+    'LimeTorrents - TV: Upload',
+    'https://www.limetorrents.fun/searchrss/Upload/',
+    30,
     '{
         "parser": "xml",
         "selectors": {
@@ -119,7 +143,44 @@ VALUES (
             "date_published": "pubDate",
             "category": "category",
             "description": "description",
-            "magnet_link": "enclosure"
+            "magnet_link": "enclosure",
+            "size": "size"
+        }
+    }'::jsonb
+),
+(
+    'LimeTorrents - Movies',
+    'https://www.limetorrents.fun/rss/16/',
+    60,
+    '{
+        "parser": "xml",
+        "selectors": {
+            "item": "item",
+            "title": "title",
+            "source_link": "link",
+            "date_published": "pubDate",
+            "category": "category",
+            "description": "description",
+            "magnet_link": "enclosure",
+            "size": "size"
+        }
+    }'::jsonb
+),
+(
+    'LimeTorrents - TV',
+    'https://www.limetorrents.fun/rss/20/',
+    30,
+    '{
+        "parser": "xml",
+        "selectors": {
+            "item": "item",
+            "title": "title",
+            "source_link": "link",
+            "date_published": "pubDate",
+            "category": "category",
+            "description": "description",
+            "magnet_link": "enclosure",
+            "size": "size"
         }
     }'::jsonb
 ) ON CONFLICT (url) DO NOTHING;

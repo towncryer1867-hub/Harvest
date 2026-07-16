@@ -46,10 +46,10 @@ async function runScraper(pool) {
             forcedMatchStatus = 'ignored';
           }
           const insertQuery = `
-            INSERT INTO scraped_entries 
-              (source_id, title, source_link, category, description, magnet_link, date_published, match_status)
-            VALUES 
-              ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO scraped_entries
+              (source_id, title, source_link, category, description, magnet_link, date_published, match_status, size)
+            VALUES
+              ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (source_link) DO NOTHING
             RETURNING id;
           `;
@@ -62,7 +62,8 @@ async function runScraper(pool) {
             entry.description,
             entry.magnet_link,
             entry.date_published,
-            forcedMatchStatus
+            forcedMatchStatus,
+            entry.size
           ]);
 
           if (result.rowCount > 0) {

@@ -5,6 +5,7 @@ import { fetchJson } from './apiClient'
 import { readNavigation, writeNavigation, migrateLegacyNavigation } from './navigation'
 import { PlexBadge, plexPosterBadgeStyle } from './PlexBadge'
 import { ResolutionBadge } from './ResolutionBadge'
+import { TrailerModal } from './TrailerModal'
 
 
 
@@ -33,10 +34,30 @@ function formatLanguage(code) {
   return LANGUAGE_NAMES[key] || code.toUpperCase();
 }
 
+// TVDB doesn't hand back a direct link to itself, but its "dereferrer"
+// URL scheme resolves straight from the numeric id we already store, no
+// slug needed — so this is always available once a title is matched.
+function getTvdbUrl(tvdbId, kind) {
+  if (!tvdbId) return null;
+  return `https://www.thetvdb.com/dereferrer/${kind}/${tvdbId}`;
+}
+
+// imdb_id is TVDB's raw remoteIds entry (e.g. "tt1234567"), or null when
+// TVDB doesn't have an IMDB cross-reference for this title.
+function getImdbUrl(imdbId) {
+  if (!imdbId) return null;
+  return `https://www.imdb.com/title/${imdbId}/`;
+}
+
+// Default sort applies to both media types via the shared 'release_date'
+// sort key: libraryQueries.js maps it to s.last_aired for series (i.e.
+// "Recent Air Date") and to release_year/release_date for movies, so one
+// shared default gives "TV Shows: Recent Air Date Desc" and
+// "Movies: Release Date Desc" as requested.
 const DEFAULT_LIBRARY_FILTERS = {
   search: '',
-  sort: 'title',
-  order: 'asc',
+  sort: 'release_date',
+  order: 'desc',
   letter: '',
   network: '',
   genre: '',
@@ -46,7 +67,11 @@ const DEFAULT_LIBRARY_FILTERS = {
   production_company: '',
   release_year: '',
   original_country: '',
-  original_language: '',
+  // Defaults the Language filter to English. This matches the raw TVDB
+  // originalLanguage code stored in the DB (e.g. 'eng'), same convention
+  // used by the Language filter dropdown values and by formatLanguage()
+  // below on the detail pages.
+  original_language: 'eng',
   in_plex: '',
   page: 1,
 };
@@ -209,6 +234,39 @@ function PlexFilterSelect({ value, onChange }) {
   );
 }
 
+// Trailer / IMDb / TheTVDB buttons for a movie or show hero section.
+// Renders nothing at all if none of the three links are available. The
+// Trailer button opens the in-page modal player; IMDb and TheTVDB are
+// plain new-tab links so the browser's native "open in new window/tab"
+// behavior applies — both are only rendered when their link is present.
+function ExternalLinksRow({ trailerUrl, imdbUrl, tvdbUrl, onPlayTrailer }) {
+  if (!trailerUrl && !imdbUrl && !tvdbUrl) return null;
+
+  return (
+    <div style={styles.externalLinksRow}>
+      {trailerUrl && (
+        <button
+          type="button"
+          style={styles.externalLinkBtn}
+          onClick={() => onPlayTrailer(trailerUrl)}
+        >
+          ▶ Watch Trailer
+        </button>
+      )}
+      {imdbUrl && (
+        <a href={imdbUrl} target="_blank" rel="noopener noreferrer" style={styles.externalLinkBtn}>
+          IMDb ↗
+        </a>
+      )}
+      {tvdbUrl && (
+        <a href={tvdbUrl} target="_blank" rel="noopener noreferrer" style={styles.externalLinkBtn}>
+          TheTVDB ↗
+        </a>
+      )}
+    </div>
+  );
+}
+
 function ScrapedEntriesDropdown({ itemId, movieId = null, isSeasonPack = false, seasonNumber = null, showId = null }) {
   const [expanded, setExpanded] = useState(false);
   const [entries, setEntries] = useState([]);
@@ -261,6 +319,7 @@ function ScrapedEntriesDropdown({ itemId, movieId = null, isSeasonPack = false, 
                   <div style={styles.metaRow}>
                     <span style={styles.badge}>{entry.category || 'N/A'}</span>
                     <ResolutionBadge title={entry.title} size="small" />
+                    <span style={styles.sizeBadge}>{entry.size || 'Size unknown'}</span>
                     <a href={entry.magnet_link} style={styles.magnetLink}>Download Magnet</a>
                     <span style={styles.subText}>Harvested: {new Date(entry.date_scraped).toLocaleDateString()}</span>
                   </div>
@@ -283,6 +342,7 @@ function App() {
   const [shows, setShows] = useState([]);
   const [selectedMovie, setSelectedMovie] = useState(null);
   const [selectedShow, setSelectedShow] = useState(null);
+  const [trailerModalUrl, setTrailerModalUrl] = useState(null);
 
   const [showSeasons, setShowSeasons] = useState([]);
   const [showEpisodes, setShowEpisodes] = useState([]);
@@ -385,6 +445,7 @@ function App() {
     setShowSeasonPacks([]);
     setActiveSeasonFilter(null);
     setShowDetailError(null);
+    setTrailerModalUrl(null);
   };
 
   const goToAdmin = () => {
@@ -397,6 +458,7 @@ function App() {
     setView('admin');
     setSelectedMovie(null);
     setSelectedShow(null);
+    setTrailerModalUrl(null);
   };
 
   const setLibraryMediaType = (type) => {
@@ -678,6 +740,13 @@ function App() {
               </div>
               <p style={styles.descriptionText}>{selectedMovie.overview || 'No overview summary logged.'}</p>
 
+              <ExternalLinksRow
+                trailerUrl={selectedMovie.trailer_url}
+                imdbUrl={getImdbUrl(selectedMovie.imdb_id)}
+                tvdbUrl={getTvdbUrl(selectedMovie.tvdb_id, 'movie')}
+                onPlayTrailer={setTrailerModalUrl}
+              />
+
               <div style={styles.ingestionBox}>
                 <h3 style={styles.sectionHeading}>Linked Index Entries</h3>
                 <p style={styles.subText}>Scraped targets bound to this unique movie profile:</p>
@@ -719,6 +788,13 @@ function App() {
                 </span>
               </div>
               <p style={styles.descriptionText}>{selectedShow.overview || 'No structural show breakdown summary listed.'}</p>
+
+              <ExternalLinksRow
+                trailerUrl={selectedShow.trailer_url}
+                imdbUrl={getImdbUrl(selectedShow.imdb_id)}
+                tvdbUrl={getTvdbUrl(selectedShow.tvdb_id, 'series')}
+                onPlayTrailer={setTrailerModalUrl}
+              />
             </div>
           </div>
 
@@ -796,6 +872,10 @@ function App() {
           <AdminDashboard />
         </div>
       )}
+
+      {trailerModalUrl && (
+        <TrailerModal url={trailerModalUrl} onClose={() => setTrailerModalUrl(null)} />
+      )}
     </div>
   )
 }
@@ -827,6 +907,13 @@ const styles = {
   metaDateItem: { fontSize: '0.85rem', color: '#495057', backgroundColor: '#f8f9fa', border: '1px solid #e9ecef', borderRadius: '6px', padding: '6px 12px' },
   mainTitle: { margin: '0 0 10px 0', fontSize: '2rem', fontWeight: 'bold', color: '#2c3e50' },
   descriptionText: { fontSize: '0.95rem', lineHeight: '1.6', color: '#495057', margin: '0 0 20px 0' },
+  externalLinksRow: { display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '20px' },
+  externalLinkBtn: {
+    display: 'inline-flex', alignItems: 'center', gap: '6px',
+    padding: '9px 16px', borderRadius: '6px', border: '1px solid #2c3e50',
+    backgroundColor: '#2c3e50', color: '#fff', fontSize: '0.8rem', fontWeight: '700',
+    cursor: 'pointer', textDecoration: 'none', lineHeight: 1,
+  },
   ingestionBox: { backgroundColor: '#f8f9fa', padding: '20px', borderRadius: '8px', border: '1px solid #e9ecef' },
   sectionHeading: { margin: '0 0 10px 0', fontSize: '1rem', fontWeight: '700' },
   rowContainer: { marginBottom: '30px', backgroundColor: '#fff', border: '1px solid #e9ecef', borderRadius: '8px', padding: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.02)' },
@@ -857,6 +944,7 @@ const styles = {
   entryTitle: { fontSize: '0.8rem', color: '#212529', display: 'block', marginBottom: '4px' },
   metaRow: { display: 'flex', gap: '15px', alignItems: 'center', flexWrap: 'wrap' },
   badge: { backgroundColor: '#e9ecef', padding: '2px 6px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: '500' },
+  sizeBadge: { backgroundColor: '#eef2ff', color: '#3730a3', border: '1px solid #dfe4fb', padding: '2px 6px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: '600' },
   magnetLink: { fontSize: '0.75rem', color: '#198754', fontWeight: '700', textDecoration: 'none' },
   libraryToolbar: { backgroundColor: '#fff', border: '1px solid #e9ecef', borderRadius: '8px', padding: '14px', marginBottom: '20px', display: 'flex', flexDirection: 'column', gap: '12px' },
   toolbarRow: { display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'flex-end' },

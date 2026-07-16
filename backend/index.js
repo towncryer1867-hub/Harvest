@@ -4,7 +4,7 @@ const { runScraper } = require('./scraper');
 const TVDBClient = require('./tvdb');
 const { processPendingMatches } = require('./matcher');
 const { sendError } = require('./errors');
-const { waitForDatabase } = require('./db');
+const { waitForDatabase, ensureSchema } = require('./db');
 const { registerPlexRoutes } = require('./plexRoutes');
 const {
   parseListQuery,
@@ -82,7 +82,7 @@ app.get('/api/media/movies/:movieId', async (req, res) => {
     const result = await pool.query(
       `SELECT id, tvdb_id, title, overview, poster_path, release_date, release_year,
               genres, studios, production_companies, original_country, original_language,
-              in_plex, plex_checked_at
+              in_plex, plex_checked_at, trailer_url, imdb_id
        FROM metadata_movies WHERE id = $1`,
       [parseInt(movieId, 10)]
     );
@@ -100,7 +100,7 @@ app.get('/api/media/movies/:movieId/entries', async (req, res) => {
   const { movieId } = req.params;
   try {
     const entries = await pool.query(
-      `SELECT e.id, e.title, e.category, e.magnet_link, e.date_scraped
+      `SELECT e.id, e.title, e.category, e.magnet_link, e.size, e.date_scraped
        FROM scraped_entries e
        JOIN metadata_items i ON e.metadata_item_id = i.id
        WHERE i.movie_id = $1 AND i.type = 'movie'
@@ -179,7 +179,7 @@ app.get('/api/media/shows/:showId/profile', async (req, res) => {
     const result = await pool.query(
       `SELECT s.id, s.tvdb_id, s.title, s.overview, s.poster_path, s.status, s.network, s.genres,
               s.first_aired, s.last_aired, s.original_country, s.original_language,
-              s.in_plex, s.plex_checked_at,
+              s.in_plex, s.plex_checked_at, s.trailer_url, s.imdb_id,
               pub.latest_published
        FROM metadata_shows s
        LEFT JOIN LATERAL (
@@ -220,7 +220,7 @@ app.get('/api/media/shows/:showId/season-packs', async (req, res) => {
   const { showId } = req.params;
   try {
     const packs = await pool.query(
-      `SELECT i.id, i.title, i.overview, i.in_plex, s.season_number 
+      `SELECT i.id, i.title, i.overview, i.in_plex, s.season_number
        FROM metadata_items i
        JOIN metadata_seasons s ON i.season_id = s.id
        WHERE i.show_id = $1 AND i.type = 'season_pack'
@@ -239,7 +239,7 @@ app.get('/api/media/shows/:showId/episodes', async (req, res) => {
   const { showId } = req.params;
   try {
     const episodes = await pool.query(
-      `SELECT i.id, i.title, i.overview, i.episode_number, i.air_date, i.in_plex, s.season_number 
+      `SELECT i.id, i.title, i.overview, i.episode_number, i.air_date, i.in_plex, s.season_number
        FROM metadata_items i
        JOIN metadata_seasons s ON i.season_id = s.id
        WHERE i.show_id = $1 AND i.type = 'episode'
@@ -258,7 +258,7 @@ app.get('/api/media/items/:itemId/entries', async (req, res) => {
   const { itemId } = req.params;
   try {
     const entries = await pool.query(
-      "SELECT id, title, category, magnet_link, date_scraped FROM scraped_entries WHERE metadata_item_id = $1 ORDER BY date_scraped DESC",
+      "SELECT id, title, category, magnet_link, size, date_scraped FROM scraped_entries WHERE metadata_item_id = $1 ORDER BY date_scraped DESC",
       [parseInt(itemId, 10)]
     );
     res.json({ entries: entries.rows });
@@ -274,7 +274,7 @@ app.get('/api/media/shows/:showId/seasons/:seasonNumber/pack-entries', async (re
   try {
     // Looks up entries attached to the 'season_pack' row for that precise show season
     const entries = await pool.query(
-      `SELECT e.id, e.title, e.category, e.magnet_link, e.date_scraped 
+      `SELECT e.id, e.title, e.category, e.magnet_link, e.size, e.date_scraped
        FROM scraped_entries e
        JOIN metadata_items i ON e.metadata_item_id = i.id
        JOIN metadata_seasons s ON i.season_id = s.id
@@ -353,9 +353,10 @@ app.post('/api/manual-match', async (req, res) => {
     const showRow = await pool.query(`
       INSERT INTO metadata_shows (
         tvdb_id, title, overview, poster_path, status, network, genres,
-        first_aired, last_aired, original_country, original_language
+        first_aired, last_aired, original_country, original_language,
+        trailer_url, imdb_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       ON CONFLICT (tvdb_id) DO UPDATE SET title = EXCLUDED.title RETURNING id
     `, [
       tvdb_id,
@@ -369,8 +370,10 @@ app.post('/api/manual-match', async (req, res) => {
       seriesMeta.last_aired,
       seriesMeta.original_country,
       seriesMeta.original_language,
+      seriesMeta.trailer_url,
+      seriesMeta.imdb_id,
     ]);
-    
+
     // Create an explicit structural placeholder pack item for manual fallback allocations
     const seasonRow = await pool.query(`
       INSERT INTO metadata_seasons (show_id, season_number, title)
@@ -493,22 +496,22 @@ app.put('/api/admin/sources/:id', async (req, res) => {
 
   try {
     const query = `
-      UPDATE scrape_sources 
-      SET 
-        name = $1, 
-        url = $2, 
-        interval_minutes = $3, 
+      UPDATE scrape_sources
+      SET
+        name = $1,
+        url = $2,
+        interval_minutes = $3,
         config_mapping = $4::jsonb,
         is_active = $5
       WHERE id = $6
       RETURNING id, name;
     `;
-    
+
     const result = await pool.query(query, [
-      name, 
-      url, 
-      parseInt(interval_minutes, 10), 
-      JSON.stringify(config), 
+      name,
+      url,
+      parseInt(interval_minutes, 10),
+      JSON.stringify(config),
       is_active !== undefined ? is_active : true,
       parseInt(id, 10)
     ]);
@@ -516,12 +519,12 @@ app.put('/api/admin/sources/:id', async (req, res) => {
     if (result.rowCount === 0) {
       return res.status(404).json({ error: "Scraping source tracking entry not found." });
     }
-    
-    res.json({ 
-      success: true, 
-      message: "Source configuration successfully updated live.", 
-      id: result.rows[0].id, 
-      name: result.rows[0].name 
+
+    res.json({
+      success: true,
+      message: "Source configuration successfully updated live.",
+      id: result.rows[0].id,
+      name: result.rows[0].name
     });
   } catch (error) {
     console.error("Failed to update scraping source:", error.message);
@@ -574,6 +577,7 @@ function schedulePipeline() {
 app.listen(port, async () => {
   try {
     await waitForDatabase(pool);
+    await ensureSchema(pool);
     console.log(`Harvest Backend listening at http://localhost:${port}`);
     schedulePipeline();
   } catch (err) {

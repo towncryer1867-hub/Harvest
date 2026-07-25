@@ -83,6 +83,19 @@ function formatDateOnly(value) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+function formatFileSize(bytes) {
+  const num = Number(bytes);
+  if (!num || Number.isNaN(num) || num <= 0) return null;
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = num;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex++;
+  }
+  return `${value.toFixed(2)} ${units[unitIndex]}`;
+}
+
 function buildQueryString(params) {
   const parts = Object.entries(params)
     .filter(([, v]) => v !== '' && v != null)
@@ -319,7 +332,7 @@ function ScrapedEntriesDropdown({ itemId, movieId = null, isSeasonPack = false, 
                   <div style={styles.metaRow}>
                     <span style={styles.badge}>{entry.category || 'N/A'}</span>
                     <ResolutionBadge title={entry.title} size="small" />
-                    <span style={styles.sizeBadge}>{entry.size || 'Size unknown'}</span>
+                    <span style={styles.sizeBadge}>{formatFileSize(entry.size) || 'Size unknown'}</span>
                     <a href={entry.magnet_link} style={styles.magnetLink}>Download Magnet</a>
                     <span style={styles.subText}>Harvested: {new Date(entry.date_scraped).toLocaleDateString()}</span>
                   </div>

@@ -46,6 +46,8 @@ function App() {
   const [statusMessage, setStatusMessage] = useState('');
   const [plexSyncResult, setPlexSyncResult] = useState(null);
   const [plexSyncing, setPlexSyncing] = useState(false);
+  const [tvdbRefreshResult, setTvdbRefreshResult] = useState(null);
+  const [tvdbRefreshing, setTvdbRefreshing] = useState(false);
   const [fetchError, setFetchError] = useState(null);
 
   const fetchEntries = useCallback(async (pageNum, status) => {
@@ -196,6 +198,21 @@ function App() {
       setStatusMessage(`Plex sync error: ${err.message}`);
     } finally {
       setPlexSyncing(false);
+    }
+  };
+
+  const handleTvdbRefresh = async () => {
+    setTvdbRefreshing(true);
+    setTvdbRefreshResult(null);
+    try {
+      setStatusMessage('Refreshing metadata from TheTVDB for every show and movie...');
+      const data = await fetchJson('/api/admin/tvdb-refresh', { method: 'POST' });
+      setTvdbRefreshResult(data);
+      setStatusMessage('TheTVDB metadata refresh complete!');
+    } catch (err) {
+      setStatusMessage(`TheTVDB refresh error: ${err.message}`);
+    } finally {
+      setTvdbRefreshing(false);
     }
   };
 
@@ -584,6 +601,78 @@ function App() {
                         </p>
                         <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '0.8rem', color: '#666' }}>
                           {plexSyncResult.errors.map((e, i) => <li key={i}>{e}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
+            <hr style={{ margin: '28px 0', border: 'none', borderTop: '1px solid #dee2e6' }} />
+
+            <h2 style={styles.sectionHeaderTitle}>TheTVDB Metadata Refresh</h2>
+            <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: '20px' }}>
+              Re-fetches title, overview, poster, genres, language, trailer, and IMDb link from
+              TheTVDB for every matched show and movie already in your catalog, and recomputes each
+              show's last aired date from its real, current episode list (the same authoritative
+              logic used after every episode match) rather than trusting TVDB's own base record,
+              which can lag. Useful after TVDB corrects or expands a title's data. This makes a live
+              TVDB request per title, so it can take a while for a large library.
+            </p>
+            <button
+              style={styles.forceSyncBtn}
+              onClick={handleTvdbRefresh}
+              disabled={tvdbRefreshing}
+            >
+              {tvdbRefreshing ? 'Refreshing from TheTVDB...' : 'Refresh TheTVDB Metadata Now'}
+            </button>
+
+            {tvdbRefreshResult && (
+              <div style={styles.plexSyncResultBox}>
+                {tvdbRefreshResult.success === false ? (
+                  <p style={{ color: '#dc3545', margin: 0 }}>
+                    Refresh did not run: {tvdbRefreshResult.error || 'Unknown reason'}
+                  </p>
+                ) : (
+                  <>
+                    <div style={styles.plexSyncResultGrid}>
+                      <div>
+                        <span style={styles.plexSyncResultLabel}>Shows Updated</span>
+                        <span style={styles.plexSyncResultValue}>
+                          {tvdbRefreshResult.shows_updated} / {tvdbRefreshResult.shows_checked}
+                        </span>
+                      </div>
+                      <div>
+                        <span style={styles.plexSyncResultLabel}>Movies Updated</span>
+                        <span style={styles.plexSyncResultValue}>
+                          {tvdbRefreshResult.movies_updated} / {tvdbRefreshResult.movies_checked}
+                        </span>
+                      </div>
+                      {tvdbRefreshResult.shows_failed > 0 && (
+                        <div>
+                          <span style={styles.plexSyncResultLabel}>Shows Failed</span>
+                          <span style={{ ...styles.plexSyncResultValue, color: '#dc3545' }}>
+                            {tvdbRefreshResult.shows_failed}
+                          </span>
+                        </div>
+                      )}
+                      {tvdbRefreshResult.movies_failed > 0 && (
+                        <div>
+                          <span style={styles.plexSyncResultLabel}>Movies Failed</span>
+                          <span style={{ ...styles.plexSyncResultValue, color: '#dc3545' }}>
+                            {tvdbRefreshResult.movies_failed}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    {tvdbRefreshResult.errors && tvdbRefreshResult.errors.length > 0 && (
+                      <div style={{ marginTop: '14px' }}>
+                        <p style={{ color: '#dc3545', fontWeight: 600, margin: '0 0 6px 0', fontSize: '0.85rem' }}>
+                          {tvdbRefreshResult.errors.length} warning(s) during refresh:
+                        </p>
+                        <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '0.8rem', color: '#666', maxHeight: '180px', overflowY: 'auto' }}>
+                          {tvdbRefreshResult.errors.map((e, i) => <li key={i}>{e}</li>)}
                         </ul>
                       </div>
                     )}

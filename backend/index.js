@@ -13,6 +13,7 @@ const {
   buildFilterOptionsQueries,
 } = require('./libraryQueries');
 const { pickEnglishTranslation, extractSeriesFields } = require('./tvdbMetadata');
+const { refreshAllTvdbMetadata } = require('./tvdbRefresh');
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -456,6 +457,19 @@ app.post('/api/admin/force-sync', async (req, res) => {
     countsQuery.rows.forEach(row => { stats[row.match_status] = parseInt(row.count, 10); });
     res.json({ success: true, message: "Metadata matching retry complete.", stats });
   } catch (error) {
+    sendError(res, error);
+  }
+});
+
+// API Route: Bulk-refresh TVDB metadata (title, overview, poster, genres,
+// language, trailer, IMDb link, and -- for shows -- a recomputed last
+// aired date) for every show and movie already matched in the catalog.
+app.post('/api/admin/tvdb-refresh', async (req, res) => {
+  try {
+    const summary = await refreshAllTvdbMetadata(pool, tvdb);
+    res.json({ success: true, ...summary });
+  } catch (error) {
+    console.error('TVDB metadata refresh failed:', error.message);
     sendError(res, error);
   }
 });

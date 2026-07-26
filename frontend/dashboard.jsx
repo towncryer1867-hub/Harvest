@@ -10,6 +10,137 @@ function formatDateOnly(value) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
+// Manages the configurable schedules backing each Admin Controls automation
+// button (Plex sync, TVDB refresh, pipeline match cycle, metadata cleanup).
+// Self-contained: fetches its own job list and owns the per-row draft state
+// for editing an interval/enabled toggle before it's saved.
+function ScheduledJobsPanel() {
+  const [jobs, setJobs] = useState([]);
+  const [drafts, setDrafts] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState(null);
+  const [savingKey, setSavingKey] = useState(null);
+  const [saveMessage, setSaveMessage] = useState('');
+
+  const loadJobs = useCallback(async () => {
+    try {
+      setLoading(true);
+      const data = await fetchJson('/api/admin/scheduled-jobs');
+      const fetchedJobs = data.jobs || [];
+      setJobs(fetchedJobs);
+      setDrafts(Object.fromEntries(
+        fetchedJobs.map(j => [j.job_key, { interval_minutes: j.interval_minutes, is_enabled: j.is_enabled }])
+      ));
+      setFetchError(null);
+    } catch (err) {
+      setFetchError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadJobs(); }, [loadJobs]);
+
+  const updateDraft = (jobKey, updates) => {
+    setDrafts(prev => ({ ...prev, [jobKey]: { ...prev[jobKey], ...updates } }));
+  };
+
+  const isDraftValid = (draft) => {
+    const n = Number(draft.interval_minutes);
+    return Number.isFinite(n) && n >= 1;
+  };
+
+  const isDirty = (job, draft) => {
+    return Number(draft.interval_minutes) !== job.interval_minutes || draft.is_enabled !== job.is_enabled;
+  };
+
+  const handleSave = async (jobKey) => {
+    const draft = drafts[jobKey];
+    if (!isDraftValid(draft)) return;
+
+    setSavingKey(jobKey);
+    setSaveMessage('');
+    try {
+      const data = await fetchJson(`/api/admin/scheduled-jobs/${jobKey}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          interval_minutes: Number(draft.interval_minutes),
+          is_enabled: draft.is_enabled,
+        })
+      });
+      setJobs(prev => prev.map(j => (j.job_key === jobKey ? data.job : j)));
+      setDrafts(prev => ({
+        ...prev,
+        [jobKey]: { interval_minutes: data.job.interval_minutes, is_enabled: data.job.is_enabled },
+      }));
+      setSaveMessage(`${data.job.label} schedule saved.`);
+    } catch (err) {
+      setSaveMessage(`Failed to save schedule: ${err.message}`);
+    } finally {
+      setSavingKey(null);
+    }
+  };
+
+  const formatLastRun = (value) => {
+    if (!value) return 'Never run yet';
+    return `Last run: ${new Date(value).toLocaleString()}`;
+  };
+
+  if (loading) return <p style={{ fontSize: '0.85rem', color: '#666' }}>Loading schedules...</p>;
+  if (fetchError) return <p style={{ fontSize: '0.85rem', color: '#dc3545' }}>{fetchError}</p>;
+
+  return (
+    <div>
+      {saveMessage && (
+        <p style={{ fontSize: '0.8rem', color: saveMessage.startsWith('Failed') ? '#dc3545' : '#198754', marginBottom: '12px' }}>
+          {saveMessage}
+        </p>
+      )}
+      {jobs.map(job => {
+        const draft = drafts[job.job_key] || { interval_minutes: job.interval_minutes, is_enabled: job.is_enabled };
+        const valid = isDraftValid(draft);
+        const dirty = isDirty(job, draft);
+        return (
+          <div key={job.job_key} style={styles.scheduleRow}>
+            <div>
+              <strong style={styles.scheduleRowLabel}>{job.label}</strong>
+              <p style={styles.sourceMetaText}>
+                {job.is_enabled ? `Automated every ${job.interval_minutes} min` : 'Manual only'} · {formatLastRun(job.last_run_at)}
+              </p>
+            </div>
+            <div style={styles.scheduleRowControls}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: '#495057' }}>
+                <input
+                  type="checkbox"
+                  checked={draft.is_enabled}
+                  onChange={(e) => updateDraft(job.job_key, { is_enabled: e.target.checked })}
+                />
+                Automated
+              </label>
+              <input
+                type="number"
+                min="1"
+                style={styles.scheduleIntervalInput}
+                value={draft.interval_minutes}
+                onChange={(e) => updateDraft(job.job_key, { interval_minutes: e.target.value })}
+              />
+              <span style={{ fontSize: '0.75rem', color: '#6c757d' }}>minutes</span>
+              <button
+                style={styles.editFormInlineBtn}
+                disabled={!dirty || !valid || savingKey === job.job_key}
+                onClick={() => handleSave(job.job_key)}
+              >
+                {savingKey === job.job_key ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function App() {
   const [entries, setEntries] = useState([]);
   const [sources, setSources] = useState([]);
@@ -561,6 +692,15 @@ function App() {
 
 {activeTab === 'admin' && (
           <div style={styles.formCard}>
+            <h2 style={styles.sectionHeaderTitle}>Automated Job Scheduling</h2>
+            <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: '20px' }}>
+              Turn any of the actions below into a recurring background job on its own timer, independent
+              of the others. Manual trigger buttons underneath still work regardless of these settings.
+            </p>
+            <ScheduledJobsPanel />
+
+            <hr style={{ margin: '28px 0', border: 'none', borderTop: '1px solid #dee2e6' }} />
+
             <h2 style={styles.sectionHeaderTitle}>Daemon Engineering Overrides</h2>
             <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: '20px' }}>
               Force immediate parsing execution over all items flagged inside the unresolved queue table cache.
@@ -815,7 +955,11 @@ const styles = {
   submitBtn: { padding: '10px', borderRadius: '4px', border: 'none', backgroundColor: '#212529', color: '#fff', fontSize: '0.85rem', fontWeight: '600', cursor: 'pointer', marginTop: '5px' },
   editFormInlineBtn: { padding: '3px 8px', borderRadius: '4px', border: '1px solid #ced4da', backgroundColor: '#fff', fontSize: '0.75rem', fontWeight: '600', color: '#0d6efd', cursor: 'pointer' },
   cancelEditBtn: { padding: '4px 10px', borderRadius: '4px', border: '1px solid #dc3545', backgroundColor: '#fff', color: '#dc3545', fontSize: '0.75rem', fontWeight: '600', cursor: 'pointer' },
-  updateSubmitBtn: { padding: '10px', borderRadius: '4px', border: 'none', backgroundColor: '#0d6efd', color: '#fff', fontSize: '0.85rem', fontWeight: '600', cursor: 'pointer', marginTop: '5px' }
+  updateSubmitBtn: { padding: '10px', borderRadius: '4px', border: 'none', backgroundColor: '#0d6efd', color: '#fff', fontSize: '0.85rem', fontWeight: '600', cursor: 'pointer', marginTop: '5px' },
+  scheduleRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', padding: '12px 14px', backgroundColor: '#fafafa', border: '1px solid #e9ecef', borderRadius: '6px', marginBottom: '10px' },
+  scheduleRowLabel: { fontSize: '0.85rem', fontWeight: '700', color: '#212529' },
+  scheduleRowControls: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' },
+  scheduleIntervalInput: { width: '70px', padding: '5px 8px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.8rem' }
 };
 
 export default App;

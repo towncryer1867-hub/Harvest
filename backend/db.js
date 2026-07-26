@@ -26,7 +26,25 @@ async function ensureSchema(pool) {
   await pool.query(`ALTER TABLE metadata_shows ADD COLUMN IF NOT EXISTS imdb_id VARCHAR(20);`);
   await pool.query(`ALTER TABLE metadata_movies ADD COLUMN IF NOT EXISTS trailer_url TEXT;`);
   await pool.query(`ALTER TABLE metadata_movies ADD COLUMN IF NOT EXISTS imdb_id VARCHAR(20);`);
-  console.log('Schema check complete (size, trailer_url, imdb_id ensured).');
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS scheduled_jobs (
+      job_key VARCHAR(50) PRIMARY KEY,
+      interval_minutes INTEGER NOT NULL DEFAULT 60,
+      is_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      last_run_at TIMESTAMP WITH TIME ZONE
+    );
+  `);
+  await pool.query(`
+    INSERT INTO scheduled_jobs (job_key, interval_minutes, is_enabled) VALUES
+      ('plex_sync', 60, FALSE),
+      ('tvdb_refresh', 1440, FALSE),
+      ('pipeline_match', 60, FALSE),
+      ('metadata_cleanup', 1440, FALSE)
+    ON CONFLICT (job_key) DO NOTHING;
+  `);
+
+  console.log('Schema check complete (size, trailer_url, imdb_id, scheduled_jobs ensured).');
 }
 
 module.exports = { waitForDatabase, ensureSchema };

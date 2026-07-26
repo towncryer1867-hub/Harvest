@@ -14,6 +14,8 @@ const {
 } = require('./libraryQueries');
 const { pickEnglishTranslation, extractSeriesFields, extractMovieFields } = require('./tvdbMetadata');
 const { refreshAllTvdbMetadata } = require('./tvdbRefresh');
+const { cleanupOrphanedMetadata } = require('./metadataCleanup');
+const { runDueScheduledJobs, JOB_DEFINITIONS, JOB_KEYS } = require('./jobScheduler');
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -635,53 +637,59 @@ app.post('/api/admin/tvdb-refresh', async (req, res) => {
   }
 });
 
-// API Route: Clean up orphaned metadata records that have drifted out of
-// sync with the raw scraped entries that back them:
-//   1. Episode items with no scraped entry pointing at them anymore.
-//   2. Movies whose sole item has no scraped entry pointing at it anymore
-//      (cascades to the movie's metadata_items row).
-//   3. Shows left with zero episodes once step 1 runs (cascades to their
-//      seasons and any remaining season-pack items).
-// Order matters: episodes must be cleared before shows are evaluated.
+// API Route: Clean up orphaned metadata records (see metadataCleanup.js for
+// the rules). Shared with the configurable scheduled job of the same name.
 app.post('/api/admin/cleanup-metadata', async (req, res) => {
   try {
-    const orphanedEpisodes = await pool.query(`
-      DELETE FROM metadata_items
-      WHERE type = 'episode'
-        AND NOT EXISTS (
-          SELECT 1 FROM scraped_entries se WHERE se.metadata_item_id = metadata_items.id
-        )
-      RETURNING id
-    `);
-
-    const orphanedMovies = await pool.query(`
-      DELETE FROM metadata_movies
-      WHERE id IN (
-        SELECT mi.movie_id FROM metadata_items mi
-        WHERE mi.type = 'movie'
-          AND NOT EXISTS (
-            SELECT 1 FROM scraped_entries se WHERE se.metadata_item_id = mi.id
-          )
-      )
-      RETURNING id
-    `);
-
-    const emptyShows = await pool.query(`
-      DELETE FROM metadata_shows
-      WHERE id NOT IN (
-        SELECT DISTINCT show_id FROM metadata_items WHERE type = 'episode' AND show_id IS NOT NULL
-      )
-      RETURNING id
-    `);
-
-    res.json({
-      success: true,
-      episodes_removed: orphanedEpisodes.rowCount,
-      movies_removed: orphanedMovies.rowCount,
-      shows_removed: emptyShows.rowCount,
-    });
+    const summary = await cleanupOrphanedMetadata(pool);
+    res.json({ success: true, ...summary });
   } catch (error) {
     console.error('Metadata cleanup failed:', error.message);
+    sendError(res, error);
+  }
+});
+
+// API Route: List the configurable schedules backing each Admin Controls
+// automation button (Plex sync, TVDB refresh, pipeline match, metadata
+// cleanup), merged with their static labels from jobScheduler.js.
+app.get('/api/admin/scheduled-jobs', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT job_key, interval_minutes, is_enabled, last_run_at FROM scheduled_jobs ORDER BY job_key ASC'
+    );
+    const jobs = result.rows.map((row) => ({
+      ...row,
+      label: JOB_DEFINITIONS[row.job_key]?.label || row.job_key,
+    }));
+    res.json({ jobs });
+  } catch (error) {
+    console.error('Failed to fetch scheduled jobs:', error.message);
+    sendError(res, error);
+  }
+});
+
+// API Route: UPDATE a scheduled job's interval and enabled state
+app.put('/api/admin/scheduled-jobs/:jobKey', async (req, res) => {
+  const { jobKey } = req.params;
+  const { interval_minutes, is_enabled } = req.body;
+
+  if (!JOB_KEYS.includes(jobKey)) {
+    return res.status(404).json({ error: `Unknown job "${jobKey}".` });
+  }
+  const intervalNum = parseInt(interval_minutes, 10);
+  if (Number.isNaN(intervalNum) || intervalNum < 1) {
+    return res.status(400).json({ error: 'interval_minutes must be a positive number.' });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE scheduled_jobs SET interval_minutes = $1, is_enabled = $2 WHERE job_key = $3
+       RETURNING job_key, interval_minutes, is_enabled, last_run_at`,
+      [intervalNum, !!is_enabled, jobKey]
+    );
+    res.json({ success: true, job: { ...result.rows[0], label: JOB_DEFINITIONS[jobKey].label } });
+  } catch (error) {
+    console.error(`Failed to update scheduled job "${jobKey}":`, error.message);
     sendError(res, error);
   }
 });
@@ -787,6 +795,7 @@ async function runPipeline() {
   try {
     await runScraper(pool);
     await processPendingMatches(pool, tvdb);
+    await runDueScheduledJobs(pool, tvdb);
   } catch (err) {
     console.error('Pipeline error:', err.message);
   } finally {

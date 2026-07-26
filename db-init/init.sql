@@ -115,6 +115,23 @@ CREATE TABLE IF NOT EXISTS scraped_entries (
     match_status VARCHAR(20) DEFAULT 'unmatched' -- 'unmatched', 'matched', 'failed', 'processing', 'ignored'
 );
 
+-- 7. Configurable schedules for the Admin Controls automation buttons (Plex
+-- sync, TVDB refresh, pipeline match cycle, metadata cleanup). One row per
+-- job_key, seeded below; see backend/jobScheduler.js for the run logic.
+CREATE TABLE IF NOT EXISTS scheduled_jobs (
+    job_key VARCHAR(50) PRIMARY KEY,
+    interval_minutes INTEGER NOT NULL DEFAULT 60,
+    is_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    last_run_at TIMESTAMP WITH TIME ZONE
+);
+
+INSERT INTO scheduled_jobs (job_key, interval_minutes, is_enabled) VALUES
+    ('plex_sync', 60, FALSE),
+    ('tvdb_refresh', 1440, FALSE),
+    ('pipeline_match', 60, FALSE),
+    ('metadata_cleanup', 1440, FALSE)
+ON CONFLICT (job_key) DO NOTHING;
+
 -- Idempotent safety net: if this script is ever re-run against a database
 -- that already has the scraped_entries table from before the `size` column
 -- existed, this adds it without erroring. (Note: on a live deployment,

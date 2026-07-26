@@ -35,9 +35,21 @@ function extractInlineYear(raw) {
   return match ? parseInt(match[1], 10) : null;
 }
 
-function buildSeriesResult({ title, season, episode, year, resolution, is_season_pack, rawTitle }) {
+// Guards the YYYY-MM-DD date detectors below against false positives (e.g. a
+// genuine "S12E31" style release where the numbers don't form a real date).
+function isValidCalendarDate(year, month, day) {
+  const m = parseInt(month, 10);
+  const d = parseInt(day, 10);
+  return m >= 1 && m <= 12 && d >= 1 && d <= 31;
+}
+
+function buildSeriesResult({ title, season, episode, year, resolution, is_season_pack, rawTitle, air_date, is_dated_episode }) {
   // Extract year from the raw title before cleaning strips it out.
   // Priority: explicitly passed year > parenthesized year in raw > inline year before season marker
+  // Dated episodes (see is_dated_episode below) never pass `year` here, since the
+  // digits captured are the episode's air date, not the show's premiere year — using
+  // it as a search-year filter would exclude the real show (e.g. Jeopardy premiered
+  // in 1984, not the air year of any given daily episode).
   const resolvedYear = year
     ?? extractParenYear(rawTitle)
     ?? extractInlineYear(rawTitle)
@@ -52,6 +64,11 @@ function buildSeriesResult({ title, season, episode, year, resolution, is_season
     is_season_pack: !!is_season_pack,
     rawTitle
   };
+
+  if (air_date) {
+    result.air_date = air_date;
+    result.is_dated_episode = !!is_dated_episode;
+  }
 
   if (resolvedYear) {
     result.year = resolvedYear;
@@ -71,29 +88,36 @@ function parseAsSeries(rawTitle) {
   const resolution = resMatch ? resMatch[1].toLowerCase() : null;
 
   // YYYY.MM.DD (dot-separated) talk show — e.g. The.Daily.Show.2026.06.19.1080p...
+  // Daily/talk shows like this are identified by air date, not season/episode
+  // number — the MM/DD here is a calendar date, never a real episode number.
   const dotDateRegex = /^(.*?)[\s._-]+(20\d{2})\.(\d{2})\.(\d{2})(?:[\s._-]|$)/i;
   const dotDateMatch = cleanTitle.match(dotDateRegex);
-  if (dotDateMatch) {
+  if (dotDateMatch && isValidCalendarDate(dotDateMatch[2], dotDateMatch[3], dotDateMatch[4])) {
     return buildSeriesResult({
       title: dotDateMatch[1],
-      year: parseInt(dotDateMatch[2], 10),
-      season: parseInt(dotDateMatch[3], 10),
-      episode: parseInt(dotDateMatch[4], 10),
+      season: null,
+      episode: null,
+      air_date: `${dotDateMatch[2]}-${dotDateMatch[3]}-${dotDateMatch[4]}`,
+      is_dated_episode: true,
       resolution,
       is_season_pack: false,
       rawTitle
     });
   }
 
-  // YYYY MM DD (space/dash/underscore) talk show — existing pattern kept
+  // YYYY MM DD (space/dash/underscore) talk show — e.g. Jeopardy 2026 05 25 720p...
+  // Same as above: this is an air date (season/episode check happens before any
+  // {Title} {Year} show search so the date digits never get treated as show-year
+  // or episode numbers).
   const yearSeasonEpisodeRegex = /^(.*?)\s+(20\d{2})[\s.\-_]+(\d{1,2})[\s.\-_]+(\d{1,2})\b/i;
   const yseMatch = cleanTitle.match(yearSeasonEpisodeRegex);
-  if (yseMatch) {
+  if (yseMatch && isValidCalendarDate(yseMatch[2], yseMatch[3], yseMatch[4])) {
     return buildSeriesResult({
       title: yseMatch[1],
-      year: parseInt(yseMatch[2], 10),
-      season: yseMatch[3],
-      episode: yseMatch[4],
+      season: null,
+      episode: null,
+      air_date: `${yseMatch[2]}-${yseMatch[3].padStart(2, '0')}-${yseMatch[4].padStart(2, '0')}`,
+      is_dated_episode: true,
       resolution,
       is_season_pack: false,
       rawTitle

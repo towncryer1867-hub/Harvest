@@ -6,6 +6,7 @@ import { readNavigation, writeNavigation, migrateLegacyNavigation } from './navi
 import { PlexBadge, plexPosterBadgeStyle } from './PlexBadge'
 import { ResolutionBadge } from './ResolutionBadge'
 import { TrailerModal } from './TrailerModal'
+import { FixMatchModal } from './FixMatchModal'
 
 
 
@@ -285,30 +286,40 @@ function ScrapedEntriesDropdown({ itemId, movieId = null, isSeasonPack = false, 
   const [entries, setEntries] = useState([]);
   const [fetchError, setFetchError] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [fixMatchEntry, setFixMatchEntry] = useState(null);
+
+  const fetchEntries = async () => {
+    try {
+      setLoading(true);
+      let url = `/api/media/items/${itemId}/entries`;
+      if (movieId) {
+        url = `/api/media/movies/${movieId}/entries`;
+      } else if (isSeasonPack) {
+        url = `/api/media/shows/${showId}/seasons/${seasonNumber}/pack-entries`;
+      }
+
+      const data = await fetchJson(url);
+      setEntries(data.entries || []);
+      setFetchError(null);
+    } catch (e) {
+      console.error("Error fetching linked raw streams:", e);
+      setFetchError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const toggleExpand = async () => {
     if (!expanded && entries.length === 0) {
-      try {
-        setLoading(true);
-        let url = `/api/media/items/${itemId}/entries`;
-        if (movieId) {
-          url = `/api/media/movies/${movieId}/entries`;
-        } else if (isSeasonPack) {
-          url = `/api/media/shows/${showId}/seasons/${seasonNumber}/pack-entries`;
-        }
-
-        const data = await fetchJson(url);
-        setEntries(data.entries || []);
-        setFetchError(null);
-      } catch (e) {
-        console.error("Error fetching linked raw streams:", e);
-        setFetchError(e.message);
-      } finally {
-        setLoading(false);
-      }
+      await fetchEntries();
     }
     setExpanded(!expanded);
   };
+
+  // Fix Match re-points a single raw entry at the correct episode/movie —
+  // season packs aren't a per-episode/movie match target, so they're excluded.
+  const canFixMatch = !isSeasonPack;
+  const fixMatchType = movieId ? 'movie' : 'episode';
 
   return (
     <div style={styles.dropdownWrapper}>
@@ -335,12 +346,27 @@ function ScrapedEntriesDropdown({ itemId, movieId = null, isSeasonPack = false, 
                     <span style={styles.sizeBadge}>{formatFileSize(entry.size) || 'Size unknown'}</span>
                     <a href={entry.magnet_link} style={styles.magnetLink}>Download Magnet</a>
                     <span style={styles.subText}>Harvested: {new Date(entry.date_scraped).toLocaleDateString()}</span>
+                    {canFixMatch && (
+                      <button style={styles.fixMatchBtn} onClick={() => setFixMatchEntry(entry)}>
+                        Fix Match
+                      </button>
+                    )}
                   </div>
                 </li>
               ))}
             </ul>
           )}
         </div>
+      )}
+
+      {fixMatchEntry && (
+        <FixMatchModal
+          type={fixMatchType}
+          entryId={fixMatchEntry.id}
+          currentLabel={fixMatchEntry.title}
+          onClose={() => setFixMatchEntry(null)}
+          onSuccess={fetchEntries}
+        />
       )}
     </div>
   );
@@ -974,7 +1000,8 @@ const styles = {
   paginationControls: { display: 'flex', alignItems: 'center', gap: '10px' },
   pageBtn: { padding: '6px 12px', borderRadius: '4px', border: '1px solid #ced4da', backgroundColor: '#fff', fontSize: '0.8rem', fontWeight: '600', cursor: 'pointer' },
   pageIndicator: { fontSize: '0.8rem', color: '#495057', fontWeight: '600' },
-  emptyGridNotice: { gridColumn: '1 / -1', padding: '40px', textAlign: 'center', color: '#6c757d', fontSize: '0.9rem', border: '1px dashed #dee2e6', borderRadius: '8px', backgroundColor: '#fafbfc' }
+  emptyGridNotice: { gridColumn: '1 / -1', padding: '40px', textAlign: 'center', color: '#6c757d', fontSize: '0.9rem', border: '1px dashed #dee2e6', borderRadius: '8px', backgroundColor: '#fafbfc' },
+  fixMatchBtn: { padding: '4px 10px', borderRadius: '4px', border: '1px solid #ced4da', backgroundColor: '#fff', fontSize: '0.7rem', fontWeight: '600', color: '#495057', cursor: 'pointer' }
 };
 
 ReactDOM.createRoot(document.getElementById('root')).render(

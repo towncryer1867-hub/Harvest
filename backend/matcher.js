@@ -120,7 +120,78 @@ async function processPendingMatches(pool, tvdb) {
             seasonId = seasonRow.rows[0].id;
           }
 
-          if (parsed.season !== null && parsed.episode !== null) {
+          if (parsed.is_dated_episode && parsed.air_date) {
+            // ----------------------------------------
+            // CASE A.0: DATED EPISODE MATCHING
+            // Daily/talk shows (Jeopardy, Dateline NBC, etc.) are released
+            // with a calendar date instead of a season/episode number, so
+            // look the episode up by its air date rather than guessing a
+            // season/episode from those digits.
+            // ----------------------------------------
+            console.log(`Found Series: "${rootAsset.name}" (ID: ${rootAsset.tvdb_id}). Fetching episode aired ${parsed.air_date}...`);
+
+            const epUrl = `${tvdb.baseUrl}/series/${rootAsset.tvdb_id}/episodes/default`;
+            const epRes = await require('axios').get(epUrl, {
+              headers: tvdb.getHeaders(),
+              params: { page: 0, airDate: parsed.air_date }
+            });
+
+            const episodes = epRes.data.data?.episodes || [];
+            const matchEp = episodes.find(e => e.aired === parsed.air_date) || episodes[0];
+
+            if (matchEp && matchEp.seasonNumber != null) {
+              const seasonQuery = `
+                INSERT INTO metadata_seasons (show_id, season_number)
+                VALUES ($1, $2)
+                ON CONFLICT (show_id, season_number) DO UPDATE SET season_number = EXCLUDED.season_number
+                RETURNING id;
+              `;
+              const seasonRow = await pool.query(seasonQuery, [showId, matchEp.seasonNumber]);
+              seasonId = seasonRow.rows[0].id;
+            }
+
+            const episodeNumber = matchEp ? matchEp.number : null;
+
+            const itemQuery = `
+              INSERT INTO metadata_items (type, tvdb_id, show_id, season_id, episode_number, title, overview, air_date)
+              VALUES ('episode', $1, $2, $3, $4, $5, $6, $7)
+              ON CONFLICT (show_id, season_id, episode_number) DO UPDATE SET
+                title = EXCLUDED.title,
+                overview = COALESCE(NULLIF(EXCLUDED.overview, ''), metadata_items.overview),
+                air_date = COALESCE(NULLIF(EXCLUDED.air_date, ''), metadata_items.air_date),
+                tvdb_id = COALESCE(NULLIF(EXCLUDED.tvdb_id, ''), metadata_items.tvdb_id)
+              RETURNING id;
+            `;
+
+            const itemRow = await pool.query(itemQuery, [
+              matchEp && matchEp.id ? String(matchEp.id) : null,
+              showId,
+              seasonId,
+              episodeNumber,
+              matchEp ? (matchEp.name || `Episode aired ${parsed.air_date}`) : `Episode aired ${parsed.air_date}`,
+              matchEp ? matchEp.overview : '',
+              matchEp ? matchEp.aired : parsed.air_date
+            ]);
+            finalMetadataId = itemRow.rows[0].id;
+
+            console.log(`Matched Episode ID ${matchEp ? matchEp.id : 'N/A'}: "${matchEp ? matchEp.name : parsed.air_date}" (Aired: ${matchEp ? matchEp.aired : parsed.air_date})`);
+
+            try {
+              const seriesEpisodes = await tvdb.getSeriesEpisodesExtended(rootAsset.tvdb_id);
+              const recentAirDate = computeRecentAirDate(seriesEpisodes);
+
+              if (recentAirDate) {
+                await pool.query(
+                  `UPDATE metadata_shows SET last_aired = $1 WHERE id = $2`,
+                  [recentAirDate, showId]
+                );
+                console.log(`Refreshed last_aired for show ID ${showId} ("${rootAsset.name}") -> ${recentAirDate}`);
+              }
+            } catch (airDateErr) {
+              console.error(`Failed to refresh last_aired for show ID ${showId}:`, airDateErr.message);
+            }
+
+          } else if (parsed.season !== null && parsed.episode !== null) {
             // ----------------------------------------
             // CASE A.1: SINGLE EPISODE MATCHING
             // ----------------------------------------

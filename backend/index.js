@@ -12,7 +12,7 @@ const {
   buildMoviesQuery,
   buildFilterOptionsQueries,
 } = require('./libraryQueries');
-const { pickEnglishTranslation, extractSeriesFields } = require('./tvdbMetadata');
+const { pickEnglishTranslation, extractSeriesFields, extractMovieFields } = require('./tvdbMetadata');
 const { refreshAllTvdbMetadata } = require('./tvdbRefresh');
 
 const app = express();
@@ -393,6 +393,167 @@ app.post('/api/manual-match', async (req, res) => {
   }
 });
 
+// ENTRIES: Fix Match — re-point a single raw scraped entry at the correct
+// TVDB series/season/episode or movie, WITHOUT touching whatever
+// episode/movie item it's currently (mis)attached to. Every other entry
+// still attached to that old item is left alone; we find-or-create the
+// correct target item and move only this one entry onto it.
+app.post('/api/entries/:entryId/fix-match', async (req, res) => {
+  const entryId = parseInt(req.params.entryId, 10);
+  const { type, tvdb_id } = req.body;
+
+  if (type !== 'movie' && type !== 'episode') {
+    return res.status(400).json({ error: "type must be 'movie' or 'episode'." });
+  }
+  if (!tvdb_id) {
+    return res.status(400).json({ error: 'A TVDB ID is required.' });
+  }
+
+  try {
+    const existingEntry = await pool.query('SELECT id FROM scraped_entries WHERE id = $1', [entryId]);
+    if (existingEntry.rowCount === 0) return res.status(404).json({ error: 'Entry not found.' });
+
+    let targetItemId;
+
+    if (type === 'movie') {
+      const details = await tvdb.getMovieDetails(tvdb_id);
+      if (!details) return res.status(404).json({ error: 'No movie found on TheTVDB for that ID.' });
+
+      const englishTranslation =
+        pickEnglishTranslation(details.translations) ||
+        (await tvdb.getMovieTranslation(tvdb_id));
+      const movieMeta = extractMovieFields(details, englishTranslation);
+
+      const movieRow = await pool.query(`
+        INSERT INTO metadata_movies (
+          tvdb_id, title, overview, poster_path, release_date, release_year,
+          genres, studios, production_companies, original_country, original_language,
+          trailer_url, imdb_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT (tvdb_id) DO UPDATE SET title = EXCLUDED.title
+        RETURNING id
+      `, [
+        tvdb_id,
+        movieMeta.title,
+        movieMeta.overview,
+        tvdb.normalizeImageUrl(movieMeta.poster_path),
+        movieMeta.release_date,
+        movieMeta.release_year,
+        movieMeta.genres,
+        movieMeta.studios,
+        movieMeta.production_companies,
+        movieMeta.original_country,
+        movieMeta.original_language,
+        movieMeta.trailer_url,
+        movieMeta.imdb_id,
+      ]);
+      const movieId = movieRow.rows[0].id;
+
+      const itemRow = await pool.query(`
+        INSERT INTO metadata_items (type, movie_id, title, overview)
+        VALUES ('movie', $1, $2, $3)
+        ON CONFLICT (movie_id) DO UPDATE SET
+          title = EXCLUDED.title,
+          overview = COALESCE(NULLIF(EXCLUDED.overview, ''), metadata_items.overview)
+        RETURNING id
+      `, [movieId, movieMeta.title, movieMeta.overview]);
+      targetItemId = itemRow.rows[0].id;
+
+    } else {
+      const { season, episode } = req.body;
+      if (season === undefined || season === null || season === '' || episode === undefined || episode === null || episode === '') {
+        return res.status(400).json({ error: 'Season and episode numbers are both required.' });
+      }
+      const seasonNum = parseInt(season, 10);
+      const episodeNum = parseInt(episode, 10);
+      if (Number.isNaN(seasonNum) || Number.isNaN(episodeNum)) {
+        return res.status(400).json({ error: 'Season and episode must be numbers.' });
+      }
+
+      const details = await tvdb.getSeriesDetails(tvdb_id);
+      if (!details) return res.status(404).json({ error: 'No series found on TheTVDB for that ID.' });
+
+      const englishTranslation =
+        pickEnglishTranslation(details.translations) ||
+        (await tvdb.getSeriesTranslation(tvdb_id));
+      const seriesMeta = extractSeriesFields(details, englishTranslation);
+
+      const showRow = await pool.query(`
+        INSERT INTO metadata_shows (
+          tvdb_id, title, overview, poster_path, status, network, genres,
+          first_aired, last_aired, original_country, original_language,
+          trailer_url, imdb_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT (tvdb_id) DO UPDATE SET title = EXCLUDED.title
+        RETURNING id
+      `, [
+        tvdb_id,
+        seriesMeta.title,
+        seriesMeta.overview,
+        tvdb.normalizeImageUrl(seriesMeta.poster_path),
+        seriesMeta.status,
+        seriesMeta.network,
+        seriesMeta.genres,
+        seriesMeta.first_aired,
+        seriesMeta.last_aired,
+        seriesMeta.original_country,
+        seriesMeta.original_language,
+        seriesMeta.trailer_url,
+        seriesMeta.imdb_id,
+      ]);
+      const showId = showRow.rows[0].id;
+
+      const seasonRow = await pool.query(`
+        INSERT INTO metadata_seasons (show_id, season_number)
+        VALUES ($1, $2)
+        ON CONFLICT (show_id, season_number) DO UPDATE SET season_number = EXCLUDED.season_number
+        RETURNING id
+      `, [showId, seasonNum]);
+      const seasonId = seasonRow.rows[0].id;
+
+      const epUrl = `${tvdb.baseUrl}/series/${tvdb_id}/episodes/default`;
+      const epRes = await require('axios').get(epUrl, {
+        headers: tvdb.getHeaders(),
+        params: { page: 0, season: seasonNum, episodeNumber: episodeNum }
+      });
+      const episodes = epRes.data.data?.episodes || [];
+      const matchEp = episodes.find(e => e.seasonNumber === seasonNum && e.number === episodeNum) || episodes[0];
+
+      const itemRow = await pool.query(`
+        INSERT INTO metadata_items (type, tvdb_id, show_id, season_id, episode_number, title, overview, air_date)
+        VALUES ('episode', $1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (show_id, season_id, episode_number) DO UPDATE SET
+          title = EXCLUDED.title,
+          overview = COALESCE(NULLIF(EXCLUDED.overview, ''), metadata_items.overview),
+          air_date = COALESCE(NULLIF(EXCLUDED.air_date, ''), metadata_items.air_date),
+          tvdb_id = COALESCE(NULLIF(EXCLUDED.tvdb_id, ''), metadata_items.tvdb_id)
+        RETURNING id
+      `, [
+        matchEp && matchEp.id ? String(matchEp.id) : null,
+        showId,
+        seasonId,
+        episodeNum,
+        matchEp ? (matchEp.name || `Episode ${episodeNum}`) : `Episode ${episodeNum}`,
+        matchEp ? matchEp.overview : '',
+        matchEp ? matchEp.aired : null,
+      ]);
+      targetItemId = itemRow.rows[0].id;
+    }
+
+    await pool.query(
+      "UPDATE scraped_entries SET metadata_item_id = $1, match_status = 'matched' WHERE id = $2",
+      [targetItemId, entryId]
+    );
+
+    res.json({ success: true, metadata_item_id: targetItemId });
+  } catch (error) {
+    console.error('Failed to fix entry match:', error.message);
+    sendError(res, error);
+  }
+});
+
 // =========================================================================
 // ADMIN API ENDPOINTS
 // =========================================================================
@@ -470,6 +631,57 @@ app.post('/api/admin/tvdb-refresh', async (req, res) => {
     res.json({ success: true, ...summary });
   } catch (error) {
     console.error('TVDB metadata refresh failed:', error.message);
+    sendError(res, error);
+  }
+});
+
+// API Route: Clean up orphaned metadata records that have drifted out of
+// sync with the raw scraped entries that back them:
+//   1. Episode items with no scraped entry pointing at them anymore.
+//   2. Movies whose sole item has no scraped entry pointing at it anymore
+//      (cascades to the movie's metadata_items row).
+//   3. Shows left with zero episodes once step 1 runs (cascades to their
+//      seasons and any remaining season-pack items).
+// Order matters: episodes must be cleared before shows are evaluated.
+app.post('/api/admin/cleanup-metadata', async (req, res) => {
+  try {
+    const orphanedEpisodes = await pool.query(`
+      DELETE FROM metadata_items
+      WHERE type = 'episode'
+        AND NOT EXISTS (
+          SELECT 1 FROM scraped_entries se WHERE se.metadata_item_id = metadata_items.id
+        )
+      RETURNING id
+    `);
+
+    const orphanedMovies = await pool.query(`
+      DELETE FROM metadata_movies
+      WHERE id IN (
+        SELECT mi.movie_id FROM metadata_items mi
+        WHERE mi.type = 'movie'
+          AND NOT EXISTS (
+            SELECT 1 FROM scraped_entries se WHERE se.metadata_item_id = mi.id
+          )
+      )
+      RETURNING id
+    `);
+
+    const emptyShows = await pool.query(`
+      DELETE FROM metadata_shows
+      WHERE id NOT IN (
+        SELECT DISTINCT show_id FROM metadata_items WHERE type = 'episode' AND show_id IS NOT NULL
+      )
+      RETURNING id
+    `);
+
+    res.json({
+      success: true,
+      episodes_removed: orphanedEpisodes.rowCount,
+      movies_removed: orphanedMovies.rowCount,
+      shows_removed: emptyShows.rowCount,
+    });
+  } catch (error) {
+    console.error('Metadata cleanup failed:', error.message);
     sendError(res, error);
   }
 });

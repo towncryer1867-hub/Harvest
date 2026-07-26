@@ -287,6 +287,9 @@ function ScrapedEntriesDropdown({ itemId, movieId = null, isSeasonPack = false, 
   const [fetchError, setFetchError] = useState(null);
   const [loading, setLoading] = useState(false);
   const [fixMatchEntry, setFixMatchEntry] = useState(null);
+  const [sendingEntryId, setSendingEntryId] = useState(null);
+  const [sentEntryIds, setSentEntryIds] = useState(() => new Set());
+  const [sendError, setSendError] = useState(null);
 
   const fetchEntries = async () => {
     try {
@@ -319,7 +322,26 @@ function ScrapedEntriesDropdown({ itemId, movieId = null, isSeasonPack = false, 
   // Fix Match re-points a single raw entry at the correct episode/movie —
   // season packs aren't a per-episode/movie match target, so they're excluded.
   const canFixMatch = !isSeasonPack;
+  // Also drives the qBittorrent category: episodes/season packs -> "tv",
+  // movies -> "movies" (see QBITTORRENT_CATEGORY_TV/MOVIES in the backend .env).
   const fixMatchType = movieId ? 'movie' : 'episode';
+
+  const handleSendToQbittorrent = async (entry) => {
+    setSendingEntryId(entry.id);
+    setSendError(null);
+    try {
+      await fetchJson('/api/qbittorrent/add-torrent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ magnet_link: entry.magnet_link, type: fixMatchType })
+      });
+      setSentEntryIds(prev => new Set(prev).add(entry.id));
+    } catch (err) {
+      setSendError(`"${entry.title}": ${err.message}`);
+    } finally {
+      setSendingEntryId(null);
+    }
+  };
 
   return (
     <div style={styles.dropdownWrapper}>
@@ -344,7 +366,17 @@ function ScrapedEntriesDropdown({ itemId, movieId = null, isSeasonPack = false, 
                     <span style={styles.badge}>{entry.category || 'N/A'}</span>
                     <ResolutionBadge title={entry.title} size="small" />
                     <span style={styles.sizeBadge}>{formatFileSize(entry.size) || 'Size unknown'}</span>
-                    <a href={entry.magnet_link} style={styles.magnetLink}>Download Magnet</a>
+                    <button
+                      style={sentEntryIds.has(entry.id) ? styles.magnetSentBtn : styles.magnetLink}
+                      onClick={() => handleSendToQbittorrent(entry)}
+                      disabled={sendingEntryId === entry.id || sentEntryIds.has(entry.id)}
+                    >
+                      {sendingEntryId === entry.id
+                        ? 'Sending...'
+                        : sentEntryIds.has(entry.id)
+                          ? 'Sent to qBittorrent ✓'
+                          : 'Send to qBittorrent'}
+                    </button>
                     <span style={styles.subText}>Harvested: {new Date(entry.date_scraped).toLocaleDateString()}</span>
                     {canFixMatch && (
                       <button style={styles.fixMatchBtn} onClick={() => setFixMatchEntry(entry)}>
@@ -356,6 +388,7 @@ function ScrapedEntriesDropdown({ itemId, movieId = null, isSeasonPack = false, 
               ))}
             </ul>
           )}
+          {sendError && <div style={styles.errorText}>{sendError}</div>}
         </div>
       )}
 
@@ -984,7 +1017,8 @@ const styles = {
   metaRow: { display: 'flex', gap: '15px', alignItems: 'center', flexWrap: 'wrap' },
   badge: { backgroundColor: '#e9ecef', padding: '2px 6px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: '500' },
   sizeBadge: { backgroundColor: '#eef2ff', color: '#3730a3', border: '1px solid #dfe4fb', padding: '2px 6px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: '600' },
-  magnetLink: { fontSize: '0.75rem', color: '#198754', fontWeight: '700', textDecoration: 'none' },
+  magnetLink: { fontSize: '0.75rem', color: '#198754', fontWeight: '700', textDecoration: 'none', background: 'none', border: 'none', padding: 0, cursor: 'pointer' },
+  magnetSentBtn: { fontSize: '0.75rem', color: '#6c757d', fontWeight: '700', textDecoration: 'none', background: 'none', border: 'none', padding: 0, cursor: 'default' },
   libraryToolbar: { backgroundColor: '#fff', border: '1px solid #e9ecef', borderRadius: '8px', padding: '14px', marginBottom: '20px', display: 'flex', flexDirection: 'column', gap: '12px' },
   toolbarRow: { display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'flex-end' },
   searchInput: { flex: '1 1 220px', padding: '8px 12px', borderRadius: '6px', border: '1px solid #ced4da', fontSize: '0.85rem' },

@@ -6,6 +6,7 @@ const { processPendingMatches } = require('./matcher');
 const { sendError } = require('./errors');
 const { waitForDatabase, ensureSchema } = require('./db');
 const { registerPlexRoutes } = require('./plexRoutes');
+const { registerQBittorrentRoutes } = require('./qbittorrentRoutes');
 const {
   parseListQuery,
   buildSeriesQuery,
@@ -32,6 +33,7 @@ const pool = new Pool({
 
 const tvdb = new TVDBClient(process.env.TVDB_API_KEY);
 registerPlexRoutes(app, pool);
+registerQBittorrentRoutes(app);
 
 
 // =========================================================================

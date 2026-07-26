@@ -104,6 +104,31 @@ function buildQueryString(params) {
   return parts.length ? `?${parts.join('&')}` : '';
 }
 
+// Just the "Showing X-Y of Z" + Previous/Page/Next controls, with none of
+// the search/sort/letter/filter inputs — used standalone under the grid so
+// the footer doesn't repeat the full toolbar (see PaginationBar usage below).
+function PaginationBar({ pagination, libraryLoading, onFilterChange }) {
+  const rangeStart = pagination.total === 0 ? 0 : (pagination.page - 1) * pagination.limit + 1;
+  const rangeEnd = Math.min(pagination.page * pagination.limit, pagination.total);
+
+  return (
+    <div style={styles.paginationBar}>
+      <span style={styles.paginationMeta}>
+        {libraryLoading
+          ? 'Loading catalog...'
+          : pagination.total === 0
+            ? 'No items match the current filters'
+            : `Showing ${rangeStart}–${rangeEnd} of ${pagination.total}`}
+      </span>
+      <div style={styles.paginationControls}>
+        <button type="button" style={styles.pageBtn} disabled={pagination.page <= 1 || libraryLoading} onClick={() => onFilterChange({ page: pagination.page - 1 })}>Previous</button>
+        <span style={styles.pageIndicator}>Page {pagination.page} of {pagination.total_pages}</span>
+        <button type="button" style={styles.pageBtn} disabled={pagination.page >= pagination.total_pages || libraryLoading} onClick={() => onFilterChange({ page: pagination.page + 1 })}>Next</button>
+      </div>
+    </div>
+  );
+}
+
 function LibraryToolbar({
   mediaType,
   filters,
@@ -114,8 +139,6 @@ function LibraryToolbar({
   onResetFilters,
 }) {
   const isSeries = mediaType === 'series';
-  const rangeStart = pagination.total === 0 ? 0 : (pagination.page - 1) * pagination.limit + 1;
-  const rangeEnd = Math.min(pagination.page * pagination.limit, pagination.total);
 
   return (
     <div style={styles.libraryToolbar}>
@@ -197,20 +220,7 @@ function LibraryToolbar({
         <PlexFilterSelect value={filters.in_plex} onChange={(v) => onFilterChange({ in_plex: v, page: 1 })} />
       </div>
 
-      <div style={styles.paginationBar}>
-        <span style={styles.paginationMeta}>
-          {libraryLoading
-            ? 'Loading catalog...'
-            : pagination.total === 0
-              ? 'No items match the current filters'
-              : `Showing ${rangeStart}–${rangeEnd} of ${pagination.total}`}
-        </span>
-        <div style={styles.paginationControls}>
-          <button type="button" style={styles.pageBtn} disabled={pagination.page <= 1 || libraryLoading} onClick={() => onFilterChange({ page: pagination.page - 1 })}>Previous</button>
-          <span style={styles.pageIndicator}>Page {pagination.page} of {pagination.total_pages}</span>
-          <button type="button" style={styles.pageBtn} disabled={pagination.page >= pagination.total_pages || libraryLoading} onClick={() => onFilterChange({ page: pagination.page + 1 })}>Next</button>
-        </div>
-      </div>
+      <PaginationBar pagination={pagination} libraryLoading={libraryLoading} onFilterChange={onFilterChange} />
     </div>
   );
 }
@@ -772,17 +782,9 @@ function App() {
             )}
           </div>
 
-          {/* Bottom toolbar with spacing from the grid above */}
+          {/* Footer pagination only — search/sort/letter/filter controls stay up top */}
           <div style={{ marginTop: '20px' }}>
-            <LibraryToolbar
-              mediaType={mediaType}
-              filters={libraryFilters}
-              filterOptions={filterOptions}
-              pagination={pagination}
-              libraryLoading={libraryLoading}
-              onFilterChange={handleLibraryFilterChange}
-              onResetFilters={resetLibraryFilters}
-            />
+            <PaginationBar pagination={pagination} libraryLoading={libraryLoading} onFilterChange={handleLibraryFilterChange} />
           </div>
         </div>
       )}

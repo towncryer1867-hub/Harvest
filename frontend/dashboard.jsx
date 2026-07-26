@@ -48,6 +48,8 @@ function App() {
   const [plexSyncing, setPlexSyncing] = useState(false);
   const [tvdbRefreshResult, setTvdbRefreshResult] = useState(null);
   const [tvdbRefreshing, setTvdbRefreshing] = useState(false);
+  const [cleanupResult, setCleanupResult] = useState(null);
+  const [cleaningUp, setCleaningUp] = useState(false);
   const [fetchError, setFetchError] = useState(null);
 
   const fetchEntries = useCallback(async (pageNum, status) => {
@@ -213,6 +215,27 @@ function App() {
       setStatusMessage(`TheTVDB refresh error: ${err.message}`);
     } finally {
       setTvdbRefreshing(false);
+    }
+  };
+
+  const handleCleanupMetadata = async () => {
+    if (!window.confirm(
+      "This permanently deletes episodes with no linked source entries, movies with no linked source entries, " +
+      "and any series left with zero episodes as a result. Continue?"
+    )) {
+      return;
+    }
+    setCleaningUp(true);
+    setCleanupResult(null);
+    try {
+      setStatusMessage('Cleaning up orphaned metadata records...');
+      const data = await fetchJson('/api/admin/cleanup-metadata', { method: 'POST' });
+      setCleanupResult(data);
+      setStatusMessage('Metadata cleanup complete!');
+    } catch (err) {
+      setStatusMessage(`Metadata cleanup error: ${err.message}`);
+    } finally {
+      setCleaningUp(false);
     }
   };
 
@@ -677,6 +700,47 @@ function App() {
                       </div>
                     )}
                   </>
+                )}
+              </div>
+            )}
+
+            <hr style={{ margin: '28px 0', border: 'none', borderTop: '1px solid #dee2e6' }} />
+
+            <h2 style={styles.sectionHeaderTitle}>Metadata Database Cleanup</h2>
+            <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: '20px' }}>
+              Removes episodes and movies that no longer have any source entries pointing at them
+              (e.g. after entries were re-matched or retried elsewhere), then removes any series
+              left with zero episodes as a result. This permanently deletes catalog rows.
+            </p>
+            <button
+              style={styles.forceSyncBtn}
+              onClick={handleCleanupMetadata}
+              disabled={cleaningUp}
+            >
+              {cleaningUp ? 'Cleaning Up Metadata...' : 'Clean Up Metadata Database'}
+            </button>
+
+            {cleanupResult && (
+              <div style={styles.plexSyncResultBox}>
+                {cleanupResult.success === false ? (
+                  <p style={{ color: '#dc3545', margin: 0 }}>
+                    Cleanup did not run: {cleanupResult.error || 'Unknown reason'}
+                  </p>
+                ) : (
+                  <div style={styles.plexSyncResultGrid}>
+                    <div>
+                      <span style={styles.plexSyncResultLabel}>Episodes Removed</span>
+                      <span style={styles.plexSyncResultValue}>{cleanupResult.episodes_removed}</span>
+                    </div>
+                    <div>
+                      <span style={styles.plexSyncResultLabel}>Movies Removed</span>
+                      <span style={styles.plexSyncResultValue}>{cleanupResult.movies_removed}</span>
+                    </div>
+                    <div>
+                      <span style={styles.plexSyncResultLabel}>Series Removed</span>
+                      <span style={styles.plexSyncResultValue}>{cleanupResult.shows_removed}</span>
+                    </div>
+                  </div>
                 )}
               </div>
             )}

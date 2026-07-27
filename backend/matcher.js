@@ -1,6 +1,7 @@
 const { parseMediaTitle } = require('./mediaParser');
 const { pickEnglishTranslation, extractSeriesFields, extractMovieFields, computeRecentAirDate } = require('./tvdbMetadata');
 const { logPipelineEvent } = require('./pipelineLog');
+const { syncShowCast, syncMovieCast } = require('./castSync');
 
 async function processPendingMatches(pool, tvdb) {
   console.log(`[${new Date().toISOString()}] Running advanced metadata matching cycle...`);
@@ -111,6 +112,7 @@ async function processPendingMatches(pool, tvdb) {
             seriesMeta.imdb_id,
           ]);
           const showId = showRow.rows[0].id;
+          await syncShowCast(pool, tvdb, showId, seriesDetails);
 
           // Step 3b: Ensure parent Season exists in `metadata_seasons`
           let seasonId = null;
@@ -355,6 +357,7 @@ async function processPendingMatches(pool, tvdb) {
             movieMeta.imdb_id,
           ]);
           const movieId = movieProfileRow.rows[0].id;
+          await syncMovieCast(pool, tvdb, movieId, movieDetails);
 
           const itemQuery = `
             INSERT INTO metadata_items (type, movie_id, title, overview)

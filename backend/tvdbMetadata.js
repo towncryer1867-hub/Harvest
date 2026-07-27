@@ -97,12 +97,18 @@ function extractMovieFields(extended, englishTranslation) {
   ];
   const productionCompanies = companyNames(companies.production);
   const releaseYear = parseYear(extended?.year || extended?.first_release?.date);
+  // TVDB's MovieExtendedRecord doesn't have a plain "released" field — the
+  // full YYYY-MM-DD release date lives on first_release.date (a Release
+  // record: { country, date, detail }). Falls back to the year-only string
+  // if a title has no first_release on file, rather than losing the field
+  // entirely.
+  const releaseDate = extended?.first_release?.date || extended?.year || '';
 
   return {
     title: englishName(extended, englishTranslation),
     overview: englishOverview(extended, englishTranslation),
     poster_path: extended?.image || '',
-    release_date: String(extended?.year || releaseYear || ''),
+    release_date: releaseDate,
     release_year: releaseYear,
     genres: genreNames(extended?.genres),
     studios: [...new Set(studios)],
@@ -152,10 +158,40 @@ function computeRecentAirDate(episodes, referenceDate = new Date()) {
   return null;
 }
 
+/**
+ * Extracts cast (actor) entries from a series/movie extended record's
+ * `characters` array (present by default on both /series/{id}/extended and
+ * /movies/{id}/extended unless the caller passes short=true, which this app
+ * never does — see TVDB's v4 OpenAPI spec).
+ *
+ * TVDB's Character schema mixes cast and crew (writers, directors, etc.)
+ * together in the same array, discriminated by `peopleType`. We keep only
+ * entries typed "Actor"; if `peopleType` is missing entirely (seen on some
+ * older/community-contributed records) the entry is kept rather than
+ * silently dropped, since that's more often a cast member than not.
+ *
+ * Returned in TVDB's own billing order (`sort`).
+ */
+function extractCast(extended) {
+  const characters = extended?.characters || [];
+
+  return characters
+    .filter((c) => c?.peopleId != null && (!c.peopleType || c.peopleType === 'Actor'))
+    .map((c) => ({
+      tvdb_people_id: String(c.peopleId),
+      actor_name: c.personName || c.name || 'Unknown',
+      character_name: c.name || null,
+      image_path: c.personImgURL || c.image || '',
+      sort_order: typeof c.sort === 'number' ? c.sort : 0,
+    }))
+    .sort((a, b) => a.sort_order - b.sort_order);
+}
+
 module.exports = {
   pickEnglishTranslation,
   extractSeriesFields,
   extractMovieFields,
+  extractCast,
   computeRecentAirDate,
   parseYear,
 };

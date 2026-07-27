@@ -60,7 +60,39 @@ async function ensureSchema(pool) {
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_pipeline_logs_created_at ON pipeline_logs(created_at DESC);`);
 
-  console.log('Schema check complete (size, trailer_url, imdb_id, scheduled_jobs, pipeline_logs ensured).');
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS metadata_actors (
+      id SERIAL PRIMARY KEY,
+      tvdb_people_id VARCHAR(50) UNIQUE NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      image_path TEXT,
+      last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS metadata_show_cast (
+      id SERIAL PRIMARY KEY,
+      show_id INT REFERENCES metadata_shows(id) ON DELETE CASCADE,
+      actor_id INT REFERENCES metadata_actors(id) ON DELETE CASCADE,
+      character_name VARCHAR(255),
+      sort_order INT DEFAULT 0,
+      CONSTRAINT unique_show_actor UNIQUE (show_id, actor_id)
+    );
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS metadata_movie_cast (
+      id SERIAL PRIMARY KEY,
+      movie_id INT REFERENCES metadata_movies(id) ON DELETE CASCADE,
+      actor_id INT REFERENCES metadata_actors(id) ON DELETE CASCADE,
+      character_name VARCHAR(255),
+      sort_order INT DEFAULT 0,
+      CONSTRAINT unique_movie_actor UNIQUE (movie_id, actor_id)
+    );
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_metadata_show_cast_show_id ON metadata_show_cast(show_id);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_metadata_movie_cast_movie_id ON metadata_movie_cast(movie_id);`);
+
+  console.log('Schema check complete (size, trailer_url, imdb_id, scheduled_jobs, pipeline_logs, cast tables ensured).');
 }
 
 module.exports = { waitForDatabase, ensureSchema };

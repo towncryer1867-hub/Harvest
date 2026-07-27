@@ -1,4 +1,5 @@
 const { pickEnglishTranslation, extractSeriesFields, extractMovieFields, computeRecentAirDate } = require('./tvdbMetadata');
+const { syncShowCast, syncMovieCast } = require('./castSync');
 
 /**
  * Re-fetches TVDB's extended record for every show and movie already in the
@@ -85,6 +86,7 @@ async function refreshAllTvdbMetadata(pool, tvdb) {
           show.id,
         ]
       );
+      await syncShowCast(pool, tvdb, show.id, details);
       summary.shows_updated++;
     } catch (err) {
       summary.shows_failed++;
@@ -144,6 +146,7 @@ async function refreshAllTvdbMetadata(pool, tvdb) {
           movie.id,
         ]
       );
+      await syncMovieCast(pool, tvdb, movie.id, details);
       summary.movies_updated++;
     } catch (err) {
       summary.movies_failed++;

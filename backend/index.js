@@ -18,6 +18,7 @@ const { refreshAllTvdbMetadata } = require('./tvdbRefresh');
 const { cleanupOrphanedMetadata } = require('./metadataCleanup');
 const { runDueScheduledJobs, JOB_DEFINITIONS, JOB_KEYS } = require('./jobScheduler');
 const { logPipelineEvent } = require('./pipelineLog');
+const { syncShowCast, syncMovieCast } = require('./castSync');
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -97,6 +98,23 @@ app.get('/api/media/movies/:movieId', async (req, res) => {
       return res.status(404).json({ error: 'Movie not found' });
     }
     res.json({ movie: result.rows[0] });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+// MOVIES: Cast list (see castSync.js for how this is populated from TVDB)
+app.get('/api/media/movies/:movieId/cast', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT a.id, a.name, a.image_path, c.character_name, c.sort_order
+       FROM metadata_movie_cast c
+       JOIN metadata_actors a ON a.id = c.actor_id
+       WHERE c.movie_id = $1
+       ORDER BY c.sort_order ASC, a.name ASC`,
+      [parseInt(req.params.movieId, 10)]
+    );
+    res.json({ cast: result.rows });
   } catch (err) {
     sendError(res, err);
   }
@@ -207,6 +225,22 @@ app.get('/api/media/shows/:showId/profile', async (req, res) => {
   }
 });
 
+// TV: Cast list (see castSync.js for how this is populated from TVDB)
+app.get('/api/media/shows/:showId/cast', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT a.id, a.name, a.image_path, c.character_name, c.sort_order
+       FROM metadata_show_cast c
+       JOIN metadata_actors a ON a.id = c.actor_id
+       WHERE c.show_id = $1
+       ORDER BY c.sort_order ASC, a.name ASC`,
+      [parseInt(req.params.showId, 10)]
+    );
+    res.json({ cast: result.rows });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
 
 app.get('/api/media/shows/:showId/seasons', async (req, res) => {
   const { showId } = req.params;
@@ -455,6 +489,7 @@ app.post('/api/entries/:entryId/fix-match', async (req, res) => {
         movieMeta.imdb_id,
       ]);
       const movieId = movieRow.rows[0].id;
+      await syncMovieCast(pool, tvdb, movieId, details);
 
       const itemRow = await pool.query(`
         INSERT INTO metadata_items (type, movie_id, title, overview)
@@ -510,6 +545,7 @@ app.post('/api/entries/:entryId/fix-match', async (req, res) => {
         seriesMeta.imdb_id,
       ]);
       const showId = showRow.rows[0].id;
+      await syncShowCast(pool, tvdb, showId, details);
 
       const seasonRow = await pool.query(`
         INSERT INTO metadata_seasons (show_id, season_number)

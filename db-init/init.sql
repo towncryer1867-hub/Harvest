@@ -99,6 +99,40 @@ CREATE INDEX IF NOT EXISTS idx_metadata_shows_in_plex ON metadata_shows(in_plex)
 CREATE INDEX IF NOT EXISTS idx_metadata_movies_in_plex ON metadata_movies(in_plex);
 CREATE INDEX IF NOT EXISTS idx_metadata_items_in_plex ON metadata_items(in_plex);
 
+-- 5b. Actors/people (from TVDB's `characters` records — see tvdbMetadata.js's
+-- extractCast()). Deduped by TVDB's own people id since the same actor can
+-- appear on multiple shows/movies; the join tables below are what "reference
+-- out" a given actor to a specific series or movie (with their character
+-- name and billing order for that title).
+CREATE TABLE IF NOT EXISTS metadata_actors (
+    id SERIAL PRIMARY KEY,
+    tvdb_people_id VARCHAR(50) UNIQUE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    image_path TEXT,
+    last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS metadata_show_cast (
+    id SERIAL PRIMARY KEY,
+    show_id INT REFERENCES metadata_shows(id) ON DELETE CASCADE,
+    actor_id INT REFERENCES metadata_actors(id) ON DELETE CASCADE,
+    character_name VARCHAR(255),
+    sort_order INT DEFAULT 0,
+    CONSTRAINT unique_show_actor UNIQUE (show_id, actor_id)
+);
+
+CREATE TABLE IF NOT EXISTS metadata_movie_cast (
+    id SERIAL PRIMARY KEY,
+    movie_id INT REFERENCES metadata_movies(id) ON DELETE CASCADE,
+    actor_id INT REFERENCES metadata_actors(id) ON DELETE CASCADE,
+    character_name VARCHAR(255),
+    sort_order INT DEFAULT 0,
+    CONSTRAINT unique_movie_actor UNIQUE (movie_id, actor_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_metadata_show_cast_show_id ON metadata_show_cast(show_id);
+CREATE INDEX IF NOT EXISTS idx_metadata_movie_cast_movie_id ON metadata_movie_cast(movie_id);
+
 -- 6. Scraped Entries (Points directly to the actual item)
 CREATE TABLE IF NOT EXISTS scraped_entries (
     id SERIAL PRIMARY KEY,

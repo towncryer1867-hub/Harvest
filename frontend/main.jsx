@@ -291,6 +291,48 @@ function ExternalLinksRow({ trailerUrl, imdbUrl, tvdbUrl, onPlayTrailer }) {
   );
 }
 
+// "Series Cast" / "Movie Cast" row shown under the description. Renders
+// nothing while loading, on a fetch error, or once loaded with an empty
+// list — a below-the-fold section failing quietly is better than an error
+// banner cluttering the detail page.
+function CastSection({ showId = null, movieId = null }) {
+  const [cast, setCast] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    const url = movieId ? `/api/media/movies/${movieId}/cast` : `/api/media/shows/${showId}/cast`;
+    fetchJson(url)
+      .then((data) => { if (!cancelled) setCast(data.cast || []); })
+      .catch((err) => { console.error('Error fetching cast:', err); if (!cancelled) setCast([]); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [showId, movieId]);
+
+  if (loading) return <div style={styles.subText}>Loading cast...</div>;
+  if (cast.length === 0) return null;
+
+  return (
+    <div style={styles.castSection}>
+      <h3 style={styles.sectionHeading}>{movieId ? 'Movie Cast' : 'Series Cast'}</h3>
+      <div style={styles.castScrollRow}>
+        {cast.map((member) => (
+          <div key={member.id} style={styles.castCard}>
+            <img
+              src={member.image_path || 'https://via.placeholder.com/90x90?text=No+Photo'}
+              alt={member.name}
+              style={styles.castPhoto}
+            />
+            <p style={styles.castActorName}>{member.name}</p>
+            {member.character_name && <p style={styles.castCharacterName}>{member.character_name}</p>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ScrapedEntriesDropdown({ itemId, movieId = null, isSeasonPack = false, seasonNumber = null, showId = null }) {
   const [expanded, setExpanded] = useState(false);
   const [entries, setEntries] = useState([]);
@@ -797,6 +839,14 @@ function App() {
             <img src={selectedMovie.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={selectedMovie.title} style={styles.largePoster} />
             <div style={styles.heroMeta}>
               <h1 style={styles.mainTitle}>{selectedMovie.title}</h1>
+
+              <ExternalLinksRow
+                trailerUrl={selectedMovie.trailer_url}
+                imdbUrl={getImdbUrl(selectedMovie.imdb_id)}
+                tvdbUrl={getTvdbUrl(selectedMovie.tvdb_id, 'movie')}
+                onPlayTrailer={setTrailerModalUrl}
+              />
+
               <div style={styles.metaDatesRow}>
                 <span style={styles.yearBadge}>Movie Entity</span>
                 <PlexBadge inPlex={selectedMovie.in_plex} />
@@ -814,12 +864,7 @@ function App() {
               </div>
               <p style={styles.descriptionText}>{selectedMovie.overview || 'No overview summary logged.'}</p>
 
-              <ExternalLinksRow
-                trailerUrl={selectedMovie.trailer_url}
-                imdbUrl={getImdbUrl(selectedMovie.imdb_id)}
-                tvdbUrl={getTvdbUrl(selectedMovie.tvdb_id, 'movie')}
-                onPlayTrailer={setTrailerModalUrl}
-              />
+              <CastSection movieId={selectedMovie.id} />
 
               <div style={styles.ingestionBox}>
                 <h3 style={styles.sectionHeading}>Linked Index Entries</h3>
@@ -841,6 +886,14 @@ function App() {
             <img src={selectedShow.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={selectedShow.title} style={styles.largePoster} />
             <div style={styles.heroMeta}>
               <h1 style={styles.mainTitle}>{selectedShow.title}</h1>
+
+              <ExternalLinksRow
+                trailerUrl={selectedShow.trailer_url}
+                imdbUrl={getImdbUrl(selectedShow.imdb_id)}
+                tvdbUrl={getTvdbUrl(selectedShow.tvdb_id, 'series')}
+                onPlayTrailer={setTrailerModalUrl}
+              />
+
               <div style={styles.metaDatesRow}>
                 <span style={styles.metaStatusBadge}>{selectedShow.status}</span>
                 <PlexBadge inPlex={selectedShow.in_plex} />
@@ -863,12 +916,7 @@ function App() {
               </div>
               <p style={styles.descriptionText}>{selectedShow.overview || 'No structural show breakdown summary listed.'}</p>
 
-              <ExternalLinksRow
-                trailerUrl={selectedShow.trailer_url}
-                imdbUrl={getImdbUrl(selectedShow.imdb_id)}
-                tvdbUrl={getTvdbUrl(selectedShow.tvdb_id, 'series')}
-                onPlayTrailer={setTrailerModalUrl}
-              />
+              <CastSection showId={selectedShow.id} />
             </div>
           </div>
 
@@ -990,6 +1038,12 @@ const styles = {
   },
   ingestionBox: { backgroundColor: '#f8f9fa', padding: '20px', borderRadius: '8px', border: '1px solid #e9ecef' },
   sectionHeading: { margin: '0 0 10px 0', fontSize: '1rem', fontWeight: '700' },
+  castSection: { marginBottom: '20px' },
+  castScrollRow: { display: 'flex', gap: '16px', overflowX: 'auto', paddingBottom: '8px' },
+  castCard: { flex: '0 0 100px', textAlign: 'center' },
+  castPhoto: { width: '90px', height: '90px', borderRadius: '50%', objectFit: 'cover', backgroundColor: '#dee2e6', display: 'block', margin: '0 auto 8px auto' },
+  castActorName: { margin: 0, fontSize: '0.8rem', fontWeight: '700', color: '#2c3e50' },
+  castCharacterName: { margin: '2px 0 0 0', fontSize: '0.75rem', color: '#6c757d' },
   rowContainer: { marginBottom: '30px', backgroundColor: '#fff', border: '1px solid #e9ecef', borderRadius: '8px', padding: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.02)' },
   rowLabelTitle: { margin: '0 0 15px 0', fontSize: '0.8rem', fontWeight: '800', color: '#6c757d', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #f1f3f5', paddingBottom: '6px' },
   seasonSelectorContainer: { display: 'flex', gap: '10px', flexWrap: 'wrap' },

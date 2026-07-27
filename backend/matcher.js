@@ -1,5 +1,6 @@
 const { parseMediaTitle } = require('./mediaParser');
 const { pickEnglishTranslation, extractSeriesFields, extractMovieFields, computeRecentAirDate } = require('./tvdbMetadata');
+const { logPipelineEvent } = require('./pipelineLog');
 
 async function processPendingMatches(pool, tvdb) {
   console.log(`[${new Date().toISOString()}] Running advanced metadata matching cycle...`);
@@ -7,8 +8,12 @@ async function processPendingMatches(pool, tvdb) {
   try {
     await tvdb.authenticate();
 
+    // ORDER BY guarantees FIFO processing — without it, Postgres doesn't
+    // promise which 10 rows come back on a given call, so a batch of
+    // never-clearing rows (see the `else` below) could keep crowding out
+    // newer entries from ever being selected at all.
     const pending = await pool.query(
-      "SELECT id, title, category, match_status FROM scraped_entries WHERE match_status IN ('unmatched') LIMIT 10"
+      "SELECT id, title, category, match_status FROM scraped_entries WHERE match_status IN ('unmatched') ORDER BY id ASC LIMIT 10"
     );
 
     for (const entry of pending.rows) {
@@ -372,15 +377,41 @@ async function processPendingMatches(pool, tvdb) {
             "UPDATE scraped_entries SET metadata_item_id = $1, match_status = 'matched' WHERE id = $2",
             [finalMetadataId, entry.id]
           );
+        } else {
+          // A TV-categorized title that didn't match the dated/S-E/season-pack
+          // cases above (or a movie search that somehow produced no usable
+          // metadata) falls through here with nothing to attach. Without this,
+          // match_status never leaves 'unmatched' and the same row gets
+          // reselected and silently no-op'd on every future cycle forever.
+          console.warn(`No matchable season/episode/pack info found for entry ID ${entry.id} ("${entry.title}") — marking failed.`);
+          await pool.query("UPDATE scraped_entries SET match_status = 'failed' WHERE id = $1", [entry.id]);
+          await logPipelineEvent(pool, {
+            source: 'matcher',
+            message: `Entry ${entry.id} ("${entry.title}") parsed as "${parsed.type}" but no season/episode/pack info was detected — no metadata item could be created.`,
+          });
         }
 
       } catch (err) {
         console.error(`Error matching entry ID ${entry.id}:`, err.message);
         await pool.query("UPDATE scraped_entries SET match_status = 'failed' WHERE id = $1", [entry.id]);
+        await logPipelineEvent(pool, {
+          source: 'matcher',
+          message: `Failed to match entry ${entry.id} ("${entry.title}"): ${err.message}`,
+          detail: err.stack,
+        });
       }
     }
   } catch (globalErr) {
     console.error("Global matcher error:", globalErr.message);
+    // This is the critical one to surface: if this fires every cycle (e.g.
+    // TVDB auth failing), the pending-entries query above never even runs,
+    // so nothing gets marked 'matched' OR 'failed' — scraping keeps working
+    // while matching silently stalls. See pipelineLog.js.
+    await logPipelineEvent(pool, {
+      source: 'matcher',
+      message: `Matching cycle aborted before processing any entries: ${globalErr.message}`,
+      detail: globalErr.stack,
+    });
   }
 }
 

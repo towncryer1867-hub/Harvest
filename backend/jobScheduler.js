@@ -1,12 +1,18 @@
 const { syncPlexFlags } = require('./plexSync');
 const { refreshAllTvdbMetadata } = require('./tvdbRefresh');
-const { processPendingMatches } = require('./matcher');
 const { cleanupOrphanedMetadata } = require('./metadataCleanup');
+const { logPipelineEvent } = require('./pipelineLog');
 
-// One entry per manual button under Admin Controls -> System Settings.
-// `label` drives the admin UI; `run` is the exact same function each
-// button's manual-trigger route calls, so a scheduled run and a manual
-// click always do identical work.
+// One entry per schedulable automation button under Admin Controls ->
+// System Settings. `label` drives the admin UI; `run` is the exact same
+// function each button's manual-trigger route calls, so a scheduled run and
+// a manual click always do identical work.
+//
+// Pipeline Match Cycle is deliberately NOT here — it already runs
+// unconditionally every ~60s as part of the core scraper pipeline (see
+// runPipeline() in index.js), so scheduling it here too would just be a
+// redundant, confusing extra trigger for the same work. Its manual button
+// still calls processPendingMatches directly via POST /api/admin/force-sync.
 const JOB_DEFINITIONS = {
   plex_sync: {
     label: 'Plex Library Sync',
@@ -15,10 +21,6 @@ const JOB_DEFINITIONS = {
   tvdb_refresh: {
     label: 'TheTVDB Metadata Refresh',
     run: (pool, tvdb) => refreshAllTvdbMetadata(pool, tvdb),
-  },
-  pipeline_match: {
-    label: 'Pipeline Match Cycle',
-    run: (pool, tvdb) => processPendingMatches(pool, tvdb),
   },
   metadata_cleanup: {
     label: 'Metadata Database Cleanup',
@@ -56,6 +58,11 @@ async function runDueScheduledJobs(pool, tvdb) {
       await definition.run(pool, tvdb);
     } catch (err) {
       console.error(`[scheduler] Job "${job.job_key}" (${definition.label}) failed:`, err.message);
+      await logPipelineEvent(pool, {
+        source: `scheduler:${job.job_key}`,
+        message: `${definition.label} failed: ${err.message}`,
+        detail: err.stack,
+      });
     } finally {
       await pool.query(
         'UPDATE scheduled_jobs SET last_run_at = CURRENT_TIMESTAMP WHERE job_key = $1',

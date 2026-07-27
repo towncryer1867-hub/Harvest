@@ -10,6 +10,137 @@ function formatDateOnly(value) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
+function formatFullTimestamp(value) {
+  if (!value) return 'Unknown';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return 'Unknown';
+  return d.toLocaleString();
+}
+
+// "scheduler:tvdb_refresh" -> "Scheduler: tvdb refresh" — good enough to
+// tell components apart without needing to duplicate jobScheduler.js's
+// label map on the frontend.
+function formatSourceLabel(source) {
+  return source
+    .split(':')
+    .map((part) => part.replace(/_/g, ' '))
+    .join(': ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// Surfaces silent pipeline failures (see backend/pipelineLog.js) so a stalled
+// component — e.g. the matcher erroring on every cycle while scraping keeps
+// running fine — is obvious at a glance instead of requiring `docker logs`.
+function DiagnosticsPanel() {
+  const [summary, setSummary] = useState([]);
+  const [logs, setLogs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState(null);
+  const [sourceFilter, setSourceFilter] = useState('');
+  const [clearing, setClearing] = useState(false);
+
+  const loadDiagnostics = useCallback(async (currentSourceFilter) => {
+    try {
+      const query = currentSourceFilter ? `?source=${encodeURIComponent(currentSourceFilter)}&limit=100` : '?limit=100';
+      const [summaryData, logsData] = await Promise.all([
+        fetchJson('/api/admin/diagnostics/summary'),
+        fetchJson(`/api/admin/logs${query}`),
+      ]);
+      setSummary(summaryData.sources || []);
+      setLogs(logsData.logs || []);
+      setFetchError(null);
+    } catch (err) {
+      setFetchError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadDiagnostics(sourceFilter);
+    const interval = setInterval(() => loadDiagnostics(sourceFilter), 15000);
+    return () => clearInterval(interval);
+  }, [sourceFilter, loadDiagnostics]);
+
+  const handleClearLogs = async () => {
+    if (!window.confirm('Permanently clear the pipeline diagnostic log? This cannot be undone.')) {
+      return;
+    }
+    setClearing(true);
+    try {
+      await fetchJson('/api/admin/logs', { method: 'DELETE' });
+      await loadDiagnostics(sourceFilter);
+    } catch (err) {
+      setFetchError(err.message);
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  if (loading) return <p style={{ fontSize: '0.85rem', color: '#666' }}>Loading diagnostics...</p>;
+
+  return (
+    <div>
+      {fetchError && <div style={styles.errorBanner}>{fetchError}</div>}
+
+      {summary.length === 0 ? (
+        <div style={{ ...styles.plexSyncResultBox, color: '#198754', fontWeight: 600, fontSize: '0.85rem' }}>
+          No errors recorded — the pipeline looks healthy.
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '12px', marginBottom: '20px' }}>
+          {summary.map((s) => (
+            <div key={s.source} style={{ ...styles.scheduleRow, flexDirection: 'column', alignItems: 'flex-start', borderLeft: '4px solid #dc3545' }}>
+              <strong style={styles.scheduleRowLabel}>{formatSourceLabel(s.source)}</strong>
+              <p style={{ ...styles.sourceMetaText, color: '#dc3545', margin: '6px 0' }}>{s.last_error_message}</p>
+              <p style={styles.sourceMetaText}>
+                Last error: {formatFullTimestamp(s.last_error_at)} · {s.count_last_hour} in last hour · {s.count_last_24h} in last 24h
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap', gap: '10px' }}>
+        <select style={{ ...styles.filterDropdown, flex: 'none', minWidth: '180px' }} value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
+          <option value="">All sources</option>
+          {summary.map((s) => (
+            <option key={s.source} value={s.source}>{formatSourceLabel(s.source)}</option>
+          ))}
+        </select>
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button style={styles.editFormInlineBtn} onClick={() => loadDiagnostics(sourceFilter)}>Refresh Now</button>
+          <button style={styles.ignoreBtn} onClick={handleClearLogs} disabled={clearing}>
+            {clearing ? 'Clearing...' : 'Clear Log'}
+          </button>
+        </div>
+      </div>
+
+      {logs.length === 0 ? (
+        <div style={styles.emptyTableCell}>No log entries{sourceFilter ? ' for this source' : ''} yet.</div>
+      ) : (
+        <ul style={styles.rawList}>
+          {logs.map((entry) => (
+            <li key={entry.id} style={styles.rawItem}>
+              <div style={styles.metaRow}>
+                <span style={{ ...styles.badge, backgroundColor: '#f8d7da', color: '#842029' }}>{formatSourceLabel(entry.source)}</span>
+                <span style={styles.sourceMetaText}>{formatFullTimestamp(entry.created_at)}</span>
+              </div>
+              <p style={{ fontSize: '0.85rem', color: '#212529', margin: '6px 0 0 0' }}>{entry.message}</p>
+              {entry.detail && (
+                <details style={{ marginTop: '4px' }}>
+                  <summary style={{ fontSize: '0.75rem', color: '#6c757d', cursor: 'pointer' }}>Stack trace</summary>
+                  <pre style={{ fontSize: '0.7rem', color: '#6c757d', whiteSpace: 'pre-wrap', margin: '4px 0 0 0' }}>{entry.detail}</pre>
+                </details>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 // Manages the configurable schedules backing each Admin Controls automation
 // button (Plex sync, TVDB refresh, pipeline match cycle, metadata cleanup).
 // Self-contained: fetches its own job list and owns the per-row draft state
@@ -453,6 +584,7 @@ function App() {
           <button style={activeTab === 'feed' ? styles.activeNavBtn : styles.navBtn} onClick={() => setActiveTab('feed')}>Scraped Streams</button>
           <button style={activeTab === 'sources' ? styles.activeNavBtn : styles.navBtn} onClick={() => setActiveTab('sources')}>Ingestion Sources</button>
           <button style={activeTab === 'admin' ? styles.activeNavBtn : styles.navBtn} onClick={() => setActiveTab('admin')}>System Settings</button>
+          <button style={activeTab === 'diagnostics' ? styles.activeNavBtn : styles.navBtn} onClick={() => setActiveTab('diagnostics')}>Diagnostics</button>
         </nav>
       </header>
 
@@ -886,6 +1018,20 @@ function App() {
             )}
           </div>
         )}
+
+        {activeTab === 'diagnostics' && (
+          <div style={styles.formCard}>
+            <h2 style={styles.sectionHeaderTitle}>Pipeline Diagnostics</h2>
+            <p style={{ fontSize: '0.85rem', color: '#666', margin: '0 0 20px 16px' }}>
+              Every silent failure from the scraper, matcher, and scheduled jobs gets logged here —
+              use this to triage when scraping keeps running but matching or another automated
+              step stops making progress.
+            </p>
+            <div style={{ padding: '0 16px 16px 16px' }}>
+              <DiagnosticsPanel />
+            </div>
+          </div>
+        )}
       </main>
     </div>
   )
@@ -959,7 +1105,11 @@ const styles = {
   scheduleRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', padding: '12px 14px', backgroundColor: '#fafafa', border: '1px solid #e9ecef', borderRadius: '6px', marginBottom: '10px' },
   scheduleRowLabel: { fontSize: '0.85rem', fontWeight: '700', color: '#212529' },
   scheduleRowControls: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' },
-  scheduleIntervalInput: { width: '70px', padding: '5px 8px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.8rem' }
+  scheduleIntervalInput: { width: '70px', padding: '5px 8px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.8rem' },
+  rawList: { listStyleType: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '10px' },
+  rawItem: { padding: '10px 12px', backgroundColor: '#fafafa', border: '1px solid #e9ecef', borderRadius: '6px' },
+  metaRow: { display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' },
+  badge: { backgroundColor: '#e9ecef', padding: '2px 6px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: '600' }
 };
 
 export default App;

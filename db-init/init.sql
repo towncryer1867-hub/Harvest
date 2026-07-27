@@ -125,12 +125,27 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     last_run_at TIMESTAMP WITH TIME ZONE
 );
 
+-- Pipeline Match Cycle is intentionally not schedulable here — see the
+-- comment on JOB_DEFINITIONS in backend/jobScheduler.js for why.
 INSERT INTO scheduled_jobs (job_key, interval_minutes, is_enabled) VALUES
     ('plex_sync', 60, FALSE),
     ('tvdb_refresh', 1440, FALSE),
-    ('pipeline_match', 60, FALSE),
     ('metadata_cleanup', 1440, FALSE)
 ON CONFLICT (job_key) DO NOTHING;
+
+-- 8. Diagnostic event log for the background pipeline (scraper, matcher,
+-- Plex sync, TVDB refresh, cleanup, scheduled jobs). Lets Admin Controls
+-- surface silent failures (e.g. TVDB auth failing every cycle) that would
+-- otherwise only show up in container stdout. See backend/pipelineLog.js.
+CREATE TABLE IF NOT EXISTS pipeline_logs (
+    id SERIAL PRIMARY KEY,
+    source VARCHAR(50) NOT NULL,
+    level VARCHAR(10) NOT NULL DEFAULT 'error',
+    message TEXT NOT NULL,
+    detail TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_logs_created_at ON pipeline_logs(created_at DESC);
 
 -- Idempotent safety net: if this script is ever re-run against a database
 -- that already has the scraped_entries table from before the `size` column

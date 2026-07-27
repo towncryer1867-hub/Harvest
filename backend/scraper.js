@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { parseXMLFeed } = require('./parser');
 const { isTvCategory, isMovieCategory } = require('./mediaParser');
+const { logPipelineEvent } = require('./pipelineLog');
 
 function isSourceDue(source) {
   if (!source.last_run_at) return true;
@@ -80,10 +81,20 @@ async function runScraper(pool) {
 
       } catch (sourceError) {
         console.error(`Error processing source "${source.name}":`, sourceError.message);
+        await logPipelineEvent(pool, {
+          source: 'scraper',
+          message: `Source "${source.name}" failed: ${sourceError.message}`,
+          detail: sourceError.stack,
+        });
       }
     }
   } catch (error) {
     console.error('Global scraper engine error:', error.message);
+    await logPipelineEvent(pool, {
+      source: 'scraper',
+      message: `Scraper cycle aborted: ${error.message}`,
+      detail: error.stack,
+    });
   }
 }
 

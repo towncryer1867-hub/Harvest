@@ -3,7 +3,7 @@ const { Pool } = require('pg');
 const { runScraper } = require('./scraper');
 const TVDBClient = require('./tvdb');
 const { processPendingMatches } = require('./matcher');
-const { sendError } = require('./errors');
+const { sendError, initErrorLogging } = require('./errors');
 const { waitForDatabase, ensureSchema } = require('./db');
 const { registerPlexRoutes } = require('./plexRoutes');
 const { registerQBittorrentRoutes } = require('./qbittorrentRoutes');
@@ -17,6 +17,7 @@ const { pickEnglishTranslation, extractSeriesFields, extractMovieFields } = requ
 const { refreshAllTvdbMetadata } = require('./tvdbRefresh');
 const { cleanupOrphanedMetadata } = require('./metadataCleanup');
 const { runDueScheduledJobs, JOB_DEFINITIONS, JOB_KEYS } = require('./jobScheduler');
+const { logPipelineEvent } = require('./pipelineLog');
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -32,6 +33,7 @@ const pool = new Pool({
 });
 
 const tvdb = new TVDBClient(process.env.TVDB_API_KEY);
+initErrorLogging(pool);
 registerPlexRoutes(app, pool);
 registerQBittorrentRoutes(app);
 
@@ -696,6 +698,94 @@ app.put('/api/admin/scheduled-jobs/:jobKey', async (req, res) => {
   }
 });
 
+// API Route: Per-source health rollup for the Diagnostics panel — the most
+// recent error logged for each pipeline component (scraper, matcher,
+// scheduler:*, etc.) plus how many errors that source has logged in the
+// last hour/24h, so a stalled component (e.g. matcher erroring every cycle)
+// is obvious at a glance without reading raw log rows.
+app.get('/api/admin/diagnostics/summary', async (req, res) => {
+  try {
+    const latestPerSource = await pool.query(`
+      SELECT DISTINCT ON (source) source, level, message, created_at
+      FROM pipeline_logs
+      WHERE level = 'error'
+      ORDER BY source, created_at DESC
+    `);
+
+    const countsPerSource = await pool.query(`
+      SELECT source,
+        COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '1 hour')::int AS count_last_hour,
+        COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours')::int AS count_last_24h
+      FROM pipeline_logs
+      WHERE level = 'error'
+      GROUP BY source
+    `);
+
+    const countsBySource = Object.fromEntries(
+      countsPerSource.rows.map((row) => [row.source, row])
+    );
+
+    const sources = latestPerSource.rows.map((row) => ({
+      source: row.source,
+      last_error_message: row.message,
+      last_error_at: row.created_at,
+      count_last_hour: countsBySource[row.source]?.count_last_hour || 0,
+      count_last_24h: countsBySource[row.source]?.count_last_24h || 0,
+    }));
+
+    res.json({ sources });
+  } catch (error) {
+    console.error('Failed to fetch diagnostics summary:', error.message);
+    sendError(res, error);
+  }
+});
+
+// API Route: Raw pipeline log listing (the "log checker"), most recent
+// first. Optional ?source= and ?level= filters, ?limit= caps rows (max 500).
+app.get('/api/admin/logs', async (req, res) => {
+  const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 100));
+  const { source, level } = req.query;
+
+  const conditions = [];
+  const params = [];
+  if (source) {
+    params.push(source);
+    conditions.push(`source = $${params.length}`);
+  }
+  if (level) {
+    params.push(level);
+    conditions.push(`level = $${params.length}`);
+  }
+  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  params.push(limit);
+
+  try {
+    const result = await pool.query(
+      `SELECT id, source, level, message, detail, created_at FROM pipeline_logs
+       ${whereClause}
+       ORDER BY created_at DESC
+       LIMIT $${params.length}`,
+      params
+    );
+    res.json({ logs: result.rows });
+  } catch (error) {
+    console.error('Failed to fetch pipeline logs:', error.message);
+    sendError(res, error);
+  }
+});
+
+// API Route: Clear the pipeline log (e.g. after resolving whatever was
+// causing the errors, to reset the Diagnostics view to a clean slate).
+app.delete('/api/admin/logs', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM pipeline_logs');
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Failed to clear pipeline logs:', error.message);
+    sendError(res, error);
+  }
+});
+
 // API Route: UPDATE Entry as ignored so metadata parsing bypasses it
 app.post('/api/admin/entries/:id/ignore', async (req, res) => {
   const { id } = req.params;
@@ -800,6 +890,11 @@ async function runPipeline() {
     await runDueScheduledJobs(pool, tvdb);
   } catch (err) {
     console.error('Pipeline error:', err.message);
+    await logPipelineEvent(pool, {
+      source: 'pipeline',
+      message: `Pipeline tick aborted: ${err.message}`,
+      detail: err.stack,
+    });
   } finally {
     pipelineRunning = false;
   }

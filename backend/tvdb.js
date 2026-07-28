@@ -148,6 +148,27 @@ class TVDBClient {
       return null;
     }
   }
+
+  /**
+   * Fetches the series' extended record with its full episode list
+   * (meta=episodes). This is the authoritative source for computing an
+   * accurate "recent air date" — TVDB's own `lastAired` field on the base
+   * series record can lag or be wrong, so we derive it ourselves from the
+   * actual episode list instead. See tvdbMetadata.computeRecentAirDate.
+   */
+  async getSeriesEpisodesExtended(tvdbId) {
+    if (!this.token) await this.authenticate();
+    try {
+      const response = await axios.get(`${this.baseUrl}/series/${tvdbId}/extended`, {
+        headers: this.getHeaders(),
+        params: { meta: 'episodes' },
+      });
+      return response.data.data?.episodes || [];
+    } catch (error) {
+      console.error(`Error fetching TVDB series episodes (meta=episodes) for ID ${tvdbId}:`, error.message);
+      return [];
+    }
+  }
 }
 
 module.exports = TVDBClient;

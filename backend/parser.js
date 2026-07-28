@@ -1,6 +1,59 @@
 const xml2js = require('xml2js');
 
 /**
+ * Normalizes a raw xml2js category node into a clean string.
+ * Handles strings, objects with attributes, and nested properties.
+ */
+function extractCategoryText(rawCategory) {
+  if (!rawCategory) return '';
+
+  if (typeof rawCategory === 'string') {
+    return rawCategory.trim();
+  }
+
+  if (typeof rawCategory === 'object') {
+    // Check inner text property '_' produced by mergeAttrs
+    if (rawCategory['_'] && typeof rawCategory['_'] === 'string') {
+      return rawCategory['_'].trim();
+    }
+    // Fallback: If inner text is missing but domain attribute exists, extract from URL
+    if (rawCategory['domain'] && typeof rawCategory['domain'] === 'string') {
+      const urlParts = rawCategory['domain'].replace(/\/$/, '').split('/');
+      const lastPart = urlParts[urlParts.length - 1];
+      if (lastPart) {
+        return lastPart.replace('-', ' ').trim();
+      }
+    }
+  }
+
+  return '';
+}
+
+/**
+ * Normalizes a raw xml2js size node (e.g. <size>1.4 GB</size>) into a clean
+ * display string. Handles plain strings and xml2js's mergeAttrs object form
+ * (inner text under '_').  Returns null when no usable value is present so
+ * downstream code can treat "unknown size" consistently.
+ */
+function extractSizeText(rawSize) {
+  if (!rawSize) return null;
+
+  if (typeof rawSize === 'string') {
+    const trimmed = rawSize.trim();
+    return trimmed || null;
+  }
+
+  if (typeof rawSize === 'object') {
+    if (rawSize['_'] && typeof rawSize['_'] === 'string') {
+      const trimmed = rawSize['_'].trim();
+      return trimmed || null;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Parses an XML feed string and extracts entries based on a dynamic source configuration mapping.
  * @param {string} xmlString - Raw XML content from the source URL.
  * @param {Object} mapping - The config_mapping object from the database.
@@ -8,7 +61,7 @@ const xml2js = require('xml2js');
 async function parseXMLFeed(xmlString, mapping) {
   const parser = new xml2js.Parser({ explicitArray: false, mergeAttrs: true });
   const result = await parser.parseStringPromise(xmlString);
-  
+
   // Navigate down to the items array based on common RSS formats (usually rss.channel.item)
   // If a feed is structured differently, we can adapt this path dynamically later.
   const channel = result.rss?.channel;
@@ -27,16 +80,37 @@ async function parseXMLFeed(xmlString, mapping) {
       magnetLink = item[selectors.magnet_link].url || item[selectors.magnet_link];
     }
 
-    // Extract raw category reference safely
-    let rawCategory = item[selectors.category] || 'Unknown';
+    // --- MULTI-CATEGORY HANDLING LOGIC ---
+    let rawCategoryInput = item[selectors.category];
     let cleanCategory = 'Unknown';
 
-    if (typeof rawCategory === 'string') {
-      cleanCategory = rawCategory;
-    } else if (rawCategory && typeof rawCategory === 'object') {
-      // If xml2js captured attributes, look for the text property '_'
-      cleanCategory = rawCategory['_'] || 'Unknown';
+    if (Array.isArray(rawCategoryInput)) {
+      // If multiple categories exist, iterate through them to find a preferred primary string
+      for (const catNode of rawCategoryInput) {
+        const text = extractCategoryText(catNode);
+        if (text && text.toLowerCase() !== 'unknown') {
+          cleanCategory = text;
+          // Prioritize standard targets if encountered early
+          if (text.toLowerCase() === 'tv shows' || text.toLowerCase() === 'movies') {
+            console.log('parser.js breaking');
+            break;
+          }
+        }
+      }
+    } else if (rawCategoryInput) {
+      // Handle single category node cleanly
+      const text = extractCategoryText(rawCategoryInput);
+      if (text) cleanCategory = text;
     }
+
+    // --- SIZE EXTRACTION LOGIC ---
+    // Most sources use a literal <size> tag (e.g. LimeTorrents' "1.4 GB").
+    // If a source's config_mapping explicitly maps a `size` selector (for
+    // feeds that use a different tag name), that takes priority; otherwise
+    // we fall back to the raw `size` field so existing sources start
+    // capturing it with no config changes required.
+    const sizeSelectorKey = selectors.size || 'size';
+    const size = extractSizeText(item[sizeSelectorKey]);
 
     // --- NEW REGEX DESCRIPTION EXTRACTION LOGIC ---
     let rawDescription = item[selectors.description] || '';
@@ -59,10 +133,11 @@ async function parseXMLFeed(xmlString, mapping) {
     return {
       title: item[selectors.title] || 'Untitled Entry',
       source_link: item[selectors.source_link] || '',
-      category: cleanCategory.trim(),
+      category: cleanCategory,
       description: cleanDescription,
       magnet_link: magnetLink,
-      date_published: item[selectors.date_published] || null
+      date_published: item[selectors.date_published] || null,
+      size
     };
   });
 }

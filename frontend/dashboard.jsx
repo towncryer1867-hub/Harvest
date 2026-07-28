@@ -3,14 +3,283 @@ import { fetchJson } from './apiClient'
 
 const PAGE_SIZE = 25;
 
+function formatDateOnly(value) {
+  if (!value) return 'Unknown';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return 'Unknown';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function formatFullTimestamp(value) {
+  if (!value) return 'Unknown';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return 'Unknown';
+  return d.toLocaleString();
+}
+
+// "scheduler:tvdb_refresh" -> "Scheduler: tvdb refresh" — good enough to
+// tell components apart without needing to duplicate jobScheduler.js's
+// label map on the frontend.
+function formatSourceLabel(source) {
+  return source
+    .split(':')
+    .map((part) => part.replace(/_/g, ' '))
+    .join(': ')
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// Surfaces silent pipeline failures (see backend/pipelineLog.js) so a stalled
+// component — e.g. the matcher erroring on every cycle while scraping keeps
+// running fine — is obvious at a glance instead of requiring `docker logs`.
+function DiagnosticsPanel() {
+  const [summary, setSummary] = useState([]);
+  const [logs, setLogs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState(null);
+  const [sourceFilter, setSourceFilter] = useState('');
+  const [clearing, setClearing] = useState(false);
+
+  const loadDiagnostics = useCallback(async (currentSourceFilter) => {
+    try {
+      const query = currentSourceFilter ? `?source=${encodeURIComponent(currentSourceFilter)}&limit=100` : '?limit=100';
+      const [summaryData, logsData] = await Promise.all([
+        fetchJson('/api/admin/diagnostics/summary'),
+        fetchJson(`/api/admin/logs${query}`),
+      ]);
+      setSummary(summaryData.sources || []);
+      setLogs(logsData.logs || []);
+      setFetchError(null);
+    } catch (err) {
+      setFetchError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadDiagnostics(sourceFilter);
+    const interval = setInterval(() => loadDiagnostics(sourceFilter), 15000);
+    return () => clearInterval(interval);
+  }, [sourceFilter, loadDiagnostics]);
+
+  const handleClearLogs = async () => {
+    if (!window.confirm('Permanently clear the pipeline diagnostic log? This cannot be undone.')) {
+      return;
+    }
+    setClearing(true);
+    try {
+      await fetchJson('/api/admin/logs', { method: 'DELETE' });
+      await loadDiagnostics(sourceFilter);
+    } catch (err) {
+      setFetchError(err.message);
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  if (loading) return <p style={{ fontSize: '0.85rem', color: '#666' }}>Loading diagnostics...</p>;
+
+  return (
+    <div>
+      {fetchError && <div style={styles.errorBanner}>{fetchError}</div>}
+
+      {summary.length === 0 ? (
+        <div style={{ ...styles.plexSyncResultBox, color: '#198754', fontWeight: 600, fontSize: '0.85rem' }}>
+          No errors recorded — the pipeline looks healthy.
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '12px', marginBottom: '20px' }}>
+          {summary.map((s) => (
+            <div key={s.source} style={{ ...styles.scheduleRow, flexDirection: 'column', alignItems: 'flex-start', borderLeft: '4px solid #dc3545' }}>
+              <strong style={styles.scheduleRowLabel}>{formatSourceLabel(s.source)}</strong>
+              <p style={{ ...styles.sourceMetaText, color: '#dc3545', margin: '6px 0' }}>{s.last_error_message}</p>
+              <p style={styles.sourceMetaText}>
+                Last error: {formatFullTimestamp(s.last_error_at)} · {s.count_last_hour} in last hour · {s.count_last_24h} in last 24h
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap', gap: '10px' }}>
+        <select style={{ ...styles.filterDropdown, flex: 'none', minWidth: '180px' }} value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
+          <option value="">All sources</option>
+          {summary.map((s) => (
+            <option key={s.source} value={s.source}>{formatSourceLabel(s.source)}</option>
+          ))}
+        </select>
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button style={styles.editFormInlineBtn} onClick={() => loadDiagnostics(sourceFilter)}>Refresh Now</button>
+          <button style={styles.ignoreBtn} onClick={handleClearLogs} disabled={clearing}>
+            {clearing ? 'Clearing...' : 'Clear Log'}
+          </button>
+        </div>
+      </div>
+
+      {logs.length === 0 ? (
+        <div style={styles.emptyTableCell}>No log entries{sourceFilter ? ' for this source' : ''} yet.</div>
+      ) : (
+        <ul style={styles.rawList}>
+          {logs.map((entry) => (
+            <li key={entry.id} style={styles.rawItem}>
+              <div style={styles.metaRow}>
+                <span style={{ ...styles.badge, backgroundColor: '#f8d7da', color: '#842029' }}>{formatSourceLabel(entry.source)}</span>
+                <span style={styles.sourceMetaText}>{formatFullTimestamp(entry.created_at)}</span>
+              </div>
+              <p style={{ fontSize: '0.85rem', color: '#212529', margin: '6px 0 0 0' }}>{entry.message}</p>
+              {entry.detail && (
+                <details style={{ marginTop: '4px' }}>
+                  <summary style={{ fontSize: '0.75rem', color: '#6c757d', cursor: 'pointer' }}>Stack trace</summary>
+                  <pre style={{ fontSize: '0.7rem', color: '#6c757d', whiteSpace: 'pre-wrap', margin: '4px 0 0 0' }}>{entry.detail}</pre>
+                </details>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// Manages the configurable schedules backing each Admin Controls automation
+// button (Plex sync, TVDB refresh, pipeline match cycle, metadata cleanup).
+// Self-contained: fetches its own job list and owns the per-row draft state
+// for editing an interval/enabled toggle before it's saved.
+function ScheduledJobsPanel() {
+  const [jobs, setJobs] = useState([]);
+  const [drafts, setDrafts] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState(null);
+  const [savingKey, setSavingKey] = useState(null);
+  const [saveMessage, setSaveMessage] = useState('');
+
+  const loadJobs = useCallback(async () => {
+    try {
+      setLoading(true);
+      const data = await fetchJson('/api/admin/scheduled-jobs');
+      const fetchedJobs = data.jobs || [];
+      setJobs(fetchedJobs);
+      setDrafts(Object.fromEntries(
+        fetchedJobs.map(j => [j.job_key, { interval_minutes: j.interval_minutes, is_enabled: j.is_enabled }])
+      ));
+      setFetchError(null);
+    } catch (err) {
+      setFetchError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadJobs(); }, [loadJobs]);
+
+  const updateDraft = (jobKey, updates) => {
+    setDrafts(prev => ({ ...prev, [jobKey]: { ...prev[jobKey], ...updates } }));
+  };
+
+  const isDraftValid = (draft) => {
+    const n = Number(draft.interval_minutes);
+    return Number.isFinite(n) && n >= 1;
+  };
+
+  const isDirty = (job, draft) => {
+    return Number(draft.interval_minutes) !== job.interval_minutes || draft.is_enabled !== job.is_enabled;
+  };
+
+  const handleSave = async (jobKey) => {
+    const draft = drafts[jobKey];
+    if (!isDraftValid(draft)) return;
+
+    setSavingKey(jobKey);
+    setSaveMessage('');
+    try {
+      const data = await fetchJson(`/api/admin/scheduled-jobs/${jobKey}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          interval_minutes: Number(draft.interval_minutes),
+          is_enabled: draft.is_enabled,
+        })
+      });
+      setJobs(prev => prev.map(j => (j.job_key === jobKey ? data.job : j)));
+      setDrafts(prev => ({
+        ...prev,
+        [jobKey]: { interval_minutes: data.job.interval_minutes, is_enabled: data.job.is_enabled },
+      }));
+      setSaveMessage(`${data.job.label} schedule saved.`);
+    } catch (err) {
+      setSaveMessage(`Failed to save schedule: ${err.message}`);
+    } finally {
+      setSavingKey(null);
+    }
+  };
+
+  const formatLastRun = (value) => {
+    if (!value) return 'Never run yet';
+    return `Last run: ${new Date(value).toLocaleString()}`;
+  };
+
+  if (loading) return <p style={{ fontSize: '0.85rem', color: '#666' }}>Loading schedules...</p>;
+  if (fetchError) return <p style={{ fontSize: '0.85rem', color: '#dc3545' }}>{fetchError}</p>;
+
+  return (
+    <div>
+      {saveMessage && (
+        <p style={{ fontSize: '0.8rem', color: saveMessage.startsWith('Failed') ? '#dc3545' : '#198754', marginBottom: '12px' }}>
+          {saveMessage}
+        </p>
+      )}
+      {jobs.map(job => {
+        const draft = drafts[job.job_key] || { interval_minutes: job.interval_minutes, is_enabled: job.is_enabled };
+        const valid = isDraftValid(draft);
+        const dirty = isDirty(job, draft);
+        return (
+          <div key={job.job_key} style={styles.scheduleRow}>
+            <div>
+              <strong style={styles.scheduleRowLabel}>{job.label}</strong>
+              <p style={styles.sourceMetaText}>
+                {job.is_enabled ? `Automated every ${job.interval_minutes} min` : 'Manual only'} · {formatLastRun(job.last_run_at)}
+              </p>
+            </div>
+            <div style={styles.scheduleRowControls}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: '#495057' }}>
+                <input
+                  type="checkbox"
+                  checked={draft.is_enabled}
+                  onChange={(e) => updateDraft(job.job_key, { is_enabled: e.target.checked })}
+                />
+                Automated
+              </label>
+              <input
+                type="number"
+                min="1"
+                style={styles.scheduleIntervalInput}
+                value={draft.interval_minutes}
+                onChange={(e) => updateDraft(job.job_key, { interval_minutes: e.target.value })}
+              />
+              <span style={{ fontSize: '0.75rem', color: '#6c757d' }}>minutes</span>
+              <button
+                style={styles.editFormInlineBtn}
+                disabled={!dirty || !valid || savingKey === job.job_key}
+                onClick={() => handleSave(job.job_key)}
+              >
+                {savingKey === job.job_key ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function App() {
   const [entries, setEntries] = useState([]);
   const [sources, setSources] = useState([]);
   const [adminData, setAdminData] = useState({ stats: { matched: 0, unmatched: 0, failed: 0, ignored: 0, processing: 0 }, failed_items: [] });
   const [loading, setLoading] = useState(true);
   const [entriesLoading, setEntriesLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState('feed'); 
-  const [manualIds, setManualIds] = useState({}); 
+  const [activeTab, setActiveTab] = useState('feed');
+  const [manualIds, setManualIds] = useState({});
   const [statusFilter, setStatusFilter] = useState('all');
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ page: 1, limit: PAGE_SIZE, total: 0, total_pages: 1 });
@@ -31,11 +300,18 @@ function App() {
         date_published: "pubDate",
         category: "category",
         description: "description",
-        magnet_link: "enclosure"
+        magnet_link: "enclosure",
+        size: "size"
       }
     }, null, 2)
   );
   const [statusMessage, setStatusMessage] = useState('');
+  const [plexSyncResult, setPlexSyncResult] = useState(null);
+  const [plexSyncing, setPlexSyncing] = useState(false);
+  const [tvdbRefreshResult, setTvdbRefreshResult] = useState(null);
+  const [tvdbRefreshing, setTvdbRefreshing] = useState(false);
+  const [cleanupResult, setCleanupResult] = useState(null);
+  const [cleaningUp, setCleaningUp] = useState(false);
   const [fetchError, setFetchError] = useState(null);
 
   const fetchEntries = useCallback(async (pageNum, status) => {
@@ -119,7 +395,7 @@ function App() {
     setIsActive(true);
     setConfigString(JSON.stringify({
       parser: "xml",
-      selectors: { item: "item", title: "title", source_link: "link", date_published: "pubDate", category: "category", description: "description", magnet_link: "enclosure" }
+      selectors: { item: "item", title: "title", source_link: "link", date_published: "pubDate", category: "category", description: "description", magnet_link: "enclosure", size: "size" }
     }, null, 2));
   };
 
@@ -151,7 +427,13 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      alert(editingSourceId ? "Source configuration updated successfully!" : `Success! Source deployed with ID: ${data.id}`);
+      if (editingSourceId) {
+        alert("Source configuration updated successfully!");
+      } else if (data.already_existed) {
+        alert(`A source with this URL already exists: "${data.name}" (ID: ${data.id}). No duplicate was created.`);
+      } else {
+        alert(`Success! Source deployed with ID: ${data.id}`);
+      }
       resetForm();
       fetchData();
     } catch (err) {
@@ -171,6 +453,57 @@ function App() {
       }
     } catch (err) {
       setStatusMessage(`Sync error: ${err.message}`);
+    }
+  };
+
+  const handlePlexSync = async () => {
+    setPlexSyncing(true);
+    setPlexSyncResult(null);
+    try {
+      setStatusMessage('Cross-referencing catalog against Plex library...');
+      const data = await fetchJson('/api/admin/plex-sync', { method: 'POST' });
+      setPlexSyncResult(data);
+      setStatusMessage('Plex sync complete!');
+    } catch (err) {
+      setStatusMessage(`Plex sync error: ${err.message}`);
+    } finally {
+      setPlexSyncing(false);
+    }
+  };
+
+  const handleTvdbRefresh = async () => {
+    setTvdbRefreshing(true);
+    setTvdbRefreshResult(null);
+    try {
+      setStatusMessage('Refreshing metadata from TheTVDB for every show and movie...');
+      const data = await fetchJson('/api/admin/tvdb-refresh', { method: 'POST' });
+      setTvdbRefreshResult(data);
+      setStatusMessage('TheTVDB metadata refresh complete!');
+    } catch (err) {
+      setStatusMessage(`TheTVDB refresh error: ${err.message}`);
+    } finally {
+      setTvdbRefreshing(false);
+    }
+  };
+
+  const handleCleanupMetadata = async () => {
+    if (!window.confirm(
+      "This permanently deletes episodes with no linked source entries, movies with no linked source entries, " +
+      "and any series left with zero episodes as a result. Continue?"
+    )) {
+      return;
+    }
+    setCleaningUp(true);
+    setCleanupResult(null);
+    try {
+      setStatusMessage('Cleaning up orphaned metadata records...');
+      const data = await fetchJson('/api/admin/cleanup-metadata', { method: 'POST' });
+      setCleanupResult(data);
+      setStatusMessage('Metadata cleanup complete!');
+    } catch (err) {
+      setStatusMessage(`Metadata cleanup error: ${err.message}`);
+    } finally {
+      setCleaningUp(false);
     }
   };
 
@@ -257,6 +590,7 @@ function App() {
           <button style={activeTab === 'feed' ? styles.activeNavBtn : styles.navBtn} onClick={() => setActiveTab('feed')}>Scraped Streams</button>
           <button style={activeTab === 'sources' ? styles.activeNavBtn : styles.navBtn} onClick={() => setActiveTab('sources')}>Ingestion Sources</button>
           <button style={activeTab === 'admin' ? styles.activeNavBtn : styles.navBtn} onClick={() => setActiveTab('admin')}>System Settings</button>
+          <button style={activeTab === 'diagnostics' ? styles.activeNavBtn : styles.navBtn} onClick={() => setActiveTab('diagnostics')}>Diagnostics</button>
         </nav>
       </header>
 
@@ -364,12 +698,12 @@ function App() {
                         {entry.match_status !== 'matched' && entry.match_status !== 'ignored' && entry.match_status !== 'processing' && (
                           <div style={styles.actionColumnWrapper}>
                             <div style={styles.manualMatchWrapper}>
-                              <input 
-                                type="text" 
-                                placeholder="TVDB ID" 
-                                style={styles.manualInput} 
-                                value={manualIds[entry.id] || ''} 
-                                onChange={(e) => setManualIds({ ...manualIds, [entry.id]: e.target.value })} 
+                              <input
+                                type="text"
+                                placeholder="TVDB ID"
+                                style={styles.manualInput}
+                                value={manualIds[entry.id] || ''}
+                                onChange={(e) => setManualIds({ ...manualIds, [entry.id]: e.target.value })}
                               />
                               <button style={styles.manualSubmitBtn} onClick={() => handleManualMatchSubmit(entry.id)}>Link</button>
                             </div>
@@ -382,8 +716,8 @@ function App() {
                                 Retry
                               </button>
                             )}
-                            <button 
-                              style={styles.ignoreBtn} 
+                            <button
+                              style={styles.ignoreBtn}
                               onClick={() => handleIgnoreEntry(entry.id)}
                               title="Ignore item permanently"
                             >
@@ -453,6 +787,7 @@ function App() {
                   </div>
                   <code style={styles.sourceUrlCode}>{src.url}</code>
                   <p style={styles.sourceMetaText}>Frequency Sequence: Checks index endpoints every <strong>{src.interval_minutes} minutes</strong>.</p>
+                  <p style={styles.sourceMetaText}>Last Checked: <strong>{src.last_run_at ? formatDateOnly(src.last_run_at) : 'Never'}</strong></p>
                 </div>
               ))}
             </div>
@@ -493,13 +828,214 @@ function App() {
           </div>
         )}
 
-        {activeTab === 'admin' && (
+{activeTab === 'admin' && (
           <div style={styles.formCard}>
+            <h2 style={styles.sectionHeaderTitle}>Automated Job Scheduling</h2>
+            <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: '20px' }}>
+              Turn any of the actions below into a recurring background job on its own timer, independent
+              of the others. Manual trigger buttons underneath still work regardless of these settings.
+            </p>
+            <ScheduledJobsPanel />
+
+            <hr style={{ margin: '28px 0', border: 'none', borderTop: '1px solid #dee2e6' }} />
+
             <h2 style={styles.sectionHeaderTitle}>Daemon Engineering Overrides</h2>
             <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: '20px' }}>
               Force immediate parsing execution over all items flagged inside the unresolved queue table cache.
             </p>
             <button style={styles.forceSyncBtn} onClick={handleForceSync}>Trigger Complete Pipeline Match Cycle</button>
+
+            <hr style={{ margin: '28px 0', border: 'none', borderTop: '1px solid #dee2e6' }} />
+
+            <h2 style={styles.sectionHeaderTitle}>Plex Library Sync</h2>
+            <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: '20px' }}>
+              Cross-references your matched shows, movies, episodes, and season packs against your Plex
+              server and updates their "In Plex" status. Runs automatically nowhere else — trigger it here
+              after adding new content to Plex, or after changing PLEX_SERVER_URL / PLEX_TOKEN.
+            </p>
+            <button
+              style={styles.forceSyncBtn}
+              onClick={handlePlexSync}
+              disabled={plexSyncing}
+            >
+              {plexSyncing ? 'Syncing with Plex...' : 'Run Plex Sync Now'}
+            </button>
+
+            {plexSyncResult && (
+              <div style={styles.plexSyncResultBox}>
+                {plexSyncResult.success === false ? (
+                  <p style={{ color: '#dc3545', margin: 0 }}>
+                    Sync did not run: {plexSyncResult.error || plexSyncResult.reason || 'Unknown reason'}
+                  </p>
+                ) : (
+                  <>
+                    <div style={styles.plexSyncResultGrid}>
+                      <div>
+                        <span style={styles.plexSyncResultLabel}>Shows</span>
+                        <span style={styles.plexSyncResultValue}>
+                          {plexSyncResult.shows_matched} / {plexSyncResult.shows_checked}
+                        </span>
+                      </div>
+                      <div>
+                        <span style={styles.plexSyncResultLabel}>Movies</span>
+                        <span style={styles.plexSyncResultValue}>
+                          {plexSyncResult.movies_matched} / {plexSyncResult.movies_checked}
+                        </span>
+                      </div>
+                      <div>
+                        <span style={styles.plexSyncResultLabel}>Episodes</span>
+                        <span style={styles.plexSyncResultValue}>
+                          {plexSyncResult.episodes_matched} / {plexSyncResult.episodes_checked}
+                        </span>
+                      </div>
+                      <div>
+                        <span style={styles.plexSyncResultLabel}>Season Packs</span>
+                        <span style={styles.plexSyncResultValue}>
+                          {plexSyncResult.season_packs_matched} / {plexSyncResult.season_packs_checked}
+                        </span>
+                      </div>
+                    </div>
+                    {plexSyncResult.errors && plexSyncResult.errors.length > 0 && (
+                      <div style={{ marginTop: '14px' }}>
+                        <p style={{ color: '#dc3545', fontWeight: 600, margin: '0 0 6px 0', fontSize: '0.85rem' }}>
+                          {plexSyncResult.errors.length} warning(s) during sync:
+                        </p>
+                        <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '0.8rem', color: '#666' }}>
+                          {plexSyncResult.errors.map((e, i) => <li key={i}>{e}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
+            <hr style={{ margin: '28px 0', border: 'none', borderTop: '1px solid #dee2e6' }} />
+
+            <h2 style={styles.sectionHeaderTitle}>TheTVDB Metadata Refresh</h2>
+            <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: '20px' }}>
+              Re-fetches title, overview, poster, genres, language, trailer, and IMDb link from
+              TheTVDB for every matched show and movie already in your catalog, and recomputes each
+              show's last aired date from its real, current episode list (the same authoritative
+              logic used after every episode match) rather than trusting TVDB's own base record,
+              which can lag. Useful after TVDB corrects or expands a title's data. This makes a live
+              TVDB request per title, so it can take a while for a large library.
+            </p>
+            <button
+              style={styles.forceSyncBtn}
+              onClick={handleTvdbRefresh}
+              disabled={tvdbRefreshing}
+            >
+              {tvdbRefreshing ? 'Refreshing from TheTVDB...' : 'Refresh TheTVDB Metadata Now'}
+            </button>
+
+            {tvdbRefreshResult && (
+              <div style={styles.plexSyncResultBox}>
+                {tvdbRefreshResult.success === false ? (
+                  <p style={{ color: '#dc3545', margin: 0 }}>
+                    Refresh did not run: {tvdbRefreshResult.error || 'Unknown reason'}
+                  </p>
+                ) : (
+                  <>
+                    <div style={styles.plexSyncResultGrid}>
+                      <div>
+                        <span style={styles.plexSyncResultLabel}>Shows Updated</span>
+                        <span style={styles.plexSyncResultValue}>
+                          {tvdbRefreshResult.shows_updated} / {tvdbRefreshResult.shows_checked}
+                        </span>
+                      </div>
+                      <div>
+                        <span style={styles.plexSyncResultLabel}>Movies Updated</span>
+                        <span style={styles.plexSyncResultValue}>
+                          {tvdbRefreshResult.movies_updated} / {tvdbRefreshResult.movies_checked}
+                        </span>
+                      </div>
+                      {tvdbRefreshResult.shows_failed > 0 && (
+                        <div>
+                          <span style={styles.plexSyncResultLabel}>Shows Failed</span>
+                          <span style={{ ...styles.plexSyncResultValue, color: '#dc3545' }}>
+                            {tvdbRefreshResult.shows_failed}
+                          </span>
+                        </div>
+                      )}
+                      {tvdbRefreshResult.movies_failed > 0 && (
+                        <div>
+                          <span style={styles.plexSyncResultLabel}>Movies Failed</span>
+                          <span style={{ ...styles.plexSyncResultValue, color: '#dc3545' }}>
+                            {tvdbRefreshResult.movies_failed}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    {tvdbRefreshResult.errors && tvdbRefreshResult.errors.length > 0 && (
+                      <div style={{ marginTop: '14px' }}>
+                        <p style={{ color: '#dc3545', fontWeight: 600, margin: '0 0 6px 0', fontSize: '0.85rem' }}>
+                          {tvdbRefreshResult.errors.length} warning(s) during refresh:
+                        </p>
+                        <ul style={{ margin: 0, paddingLeft: '18px', fontSize: '0.8rem', color: '#666', maxHeight: '180px', overflowY: 'auto' }}>
+                          {tvdbRefreshResult.errors.map((e, i) => <li key={i}>{e}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
+            <hr style={{ margin: '28px 0', border: 'none', borderTop: '1px solid #dee2e6' }} />
+
+            <h2 style={styles.sectionHeaderTitle}>Metadata Database Cleanup</h2>
+            <p style={{ fontSize: '0.85rem', color: '#666', marginBottom: '20px' }}>
+              Removes episodes and movies that no longer have any source entries pointing at them
+              (e.g. after entries were re-matched or retried elsewhere), then removes any series
+              left with zero episodes as a result. This permanently deletes catalog rows.
+            </p>
+            <button
+              style={styles.forceSyncBtn}
+              onClick={handleCleanupMetadata}
+              disabled={cleaningUp}
+            >
+              {cleaningUp ? 'Cleaning Up Metadata...' : 'Clean Up Metadata Database'}
+            </button>
+
+            {cleanupResult && (
+              <div style={styles.plexSyncResultBox}>
+                {cleanupResult.success === false ? (
+                  <p style={{ color: '#dc3545', margin: 0 }}>
+                    Cleanup did not run: {cleanupResult.error || 'Unknown reason'}
+                  </p>
+                ) : (
+                  <div style={styles.plexSyncResultGrid}>
+                    <div>
+                      <span style={styles.plexSyncResultLabel}>Episodes Removed</span>
+                      <span style={styles.plexSyncResultValue}>{cleanupResult.episodes_removed}</span>
+                    </div>
+                    <div>
+                      <span style={styles.plexSyncResultLabel}>Movies Removed</span>
+                      <span style={styles.plexSyncResultValue}>{cleanupResult.movies_removed}</span>
+                    </div>
+                    <div>
+                      <span style={styles.plexSyncResultLabel}>Series Removed</span>
+                      <span style={styles.plexSyncResultValue}>{cleanupResult.shows_removed}</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'diagnostics' && (
+          <div style={styles.formCard}>
+            <h2 style={styles.sectionHeaderTitle}>Pipeline Diagnostics</h2>
+            <p style={{ fontSize: '0.85rem', color: '#666', margin: '0 0 20px 16px' }}>
+              Every silent failure from the scraper, matcher, and scheduled jobs gets logged here —
+              use this to triage when scraping keeps running but matching or another automated
+              step stops making progress.
+            </p>
+            <div style={{ padding: '0 16px 16px 16px' }}>
+              <DiagnosticsPanel />
+            </div>
           </div>
         )}
       </main>
@@ -549,6 +1085,10 @@ const styles = {
   statusToast: { padding: '12px 16px', backgroundColor: '#e2e3e5', color: '#383d41', borderRadius: '6px', fontSize: '0.85rem', fontWeight: '500', marginBottom: '20px', border: '1px solid #d6d8db' },
   errorBanner: { padding: '12px 16px', backgroundColor: '#f8d7da', color: '#842029', borderRadius: '6px', fontSize: '0.85rem', fontWeight: '500', marginBottom: '20px', border: '1px solid #f5c2c7' },
   forceSyncBtn: { padding: '10px 20px', backgroundColor: '#198754', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: '600', cursor: 'pointer' },
+  plexSyncResultBox: { marginTop: '18px', padding: '16px', backgroundColor: '#f8f9fa', border: '1px solid #dee2e6', borderRadius: '6px' },
+  plexSyncResultGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '16px' },
+  plexSyncResultLabel: { display: 'block', fontSize: '0.75rem', color: '#666', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' },
+  plexSyncResultValue: { display: 'block', fontSize: '1.3rem', fontWeight: 700, color: '#212529' },
   filterRow: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '15px', backgroundColor: '#fff', padding: '10px', borderRadius: '8px', border: '1px solid #e9ecef' },
   filterLabel: { fontSize: '0.85rem', fontWeight: 'bold', color: '#495057' },
   filterDropdown: { flex: 1, padding: '6px 10px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.85rem', backgroundColor: '#ffffff', cursor: 'pointer' },
@@ -567,7 +1107,15 @@ const styles = {
   submitBtn: { padding: '10px', borderRadius: '4px', border: 'none', backgroundColor: '#212529', color: '#fff', fontSize: '0.85rem', fontWeight: '600', cursor: 'pointer', marginTop: '5px' },
   editFormInlineBtn: { padding: '3px 8px', borderRadius: '4px', border: '1px solid #ced4da', backgroundColor: '#fff', fontSize: '0.75rem', fontWeight: '600', color: '#0d6efd', cursor: 'pointer' },
   cancelEditBtn: { padding: '4px 10px', borderRadius: '4px', border: '1px solid #dc3545', backgroundColor: '#fff', color: '#dc3545', fontSize: '0.75rem', fontWeight: '600', cursor: 'pointer' },
-  updateSubmitBtn: { padding: '10px', borderRadius: '4px', border: 'none', backgroundColor: '#0d6efd', color: '#fff', fontSize: '0.85rem', fontWeight: '600', cursor: 'pointer', marginTop: '5px' }
+  updateSubmitBtn: { padding: '10px', borderRadius: '4px', border: 'none', backgroundColor: '#0d6efd', color: '#fff', fontSize: '0.85rem', fontWeight: '600', cursor: 'pointer', marginTop: '5px' },
+  scheduleRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', padding: '12px 14px', backgroundColor: '#fafafa', border: '1px solid #e9ecef', borderRadius: '6px', marginBottom: '10px' },
+  scheduleRowLabel: { fontSize: '0.85rem', fontWeight: '700', color: '#212529' },
+  scheduleRowControls: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' },
+  scheduleIntervalInput: { width: '70px', padding: '5px 8px', borderRadius: '4px', border: '1px solid #ced4da', fontSize: '0.8rem' },
+  rawList: { listStyleType: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '10px' },
+  rawItem: { padding: '10px 12px', backgroundColor: '#fafafa', border: '1px solid #e9ecef', borderRadius: '6px' },
+  metaRow: { display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' },
+  badge: { backgroundColor: '#e9ecef', padding: '2px 6px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: '600' }
 };
 
 export default App;

@@ -3,15 +3,22 @@ const { Pool } = require('pg');
 const { runScraper } = require('./scraper');
 const TVDBClient = require('./tvdb');
 const { processPendingMatches } = require('./matcher');
-const { sendError } = require('./errors');
-const { waitForDatabase } = require('./db');
+const { sendError, initErrorLogging } = require('./errors');
+const { waitForDatabase, ensureSchema } = require('./db');
+const { registerPlexRoutes } = require('./plexRoutes');
+const { registerQBittorrentRoutes } = require('./qbittorrentRoutes');
 const {
   parseListQuery,
   buildSeriesQuery,
   buildMoviesQuery,
   buildFilterOptionsQueries,
 } = require('./libraryQueries');
-const { pickEnglishTranslation, extractSeriesFields } = require('./tvdbMetadata');
+const { pickEnglishTranslation, extractSeriesFields, extractMovieFields } = require('./tvdbMetadata');
+const { refreshAllTvdbMetadata } = require('./tvdbRefresh');
+const { cleanupOrphanedMetadata } = require('./metadataCleanup');
+const { runDueScheduledJobs, JOB_DEFINITIONS, JOB_KEYS } = require('./jobScheduler');
+const { logPipelineEvent } = require('./pipelineLog');
+const { syncShowCast, syncMovieCast } = require('./castSync');
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -27,6 +34,9 @@ const pool = new Pool({
 });
 
 const tvdb = new TVDBClient(process.env.TVDB_API_KEY);
+initErrorLogging(pool);
+registerPlexRoutes(app, pool);
+registerQBittorrentRoutes(app);
 
 
 // =========================================================================
@@ -46,6 +56,7 @@ app.get('/api/media/movies', async (req, res) => {
         release_year: req.query.release_year || '',
         original_country: req.query.original_country || '',
         original_language: req.query.original_language || '',
+        in_plex: req.query.in_plex || '',
       },
     });
 
@@ -78,7 +89,8 @@ app.get('/api/media/movies/:movieId', async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT id, tvdb_id, title, overview, poster_path, release_date, release_year,
-              genres, studios, production_companies, original_country, original_language
+              genres, studios, production_companies, original_country, original_language,
+              in_plex, plex_checked_at, trailer_url, imdb_id
        FROM metadata_movies WHERE id = $1`,
       [parseInt(movieId, 10)]
     );
@@ -91,12 +103,29 @@ app.get('/api/media/movies/:movieId', async (req, res) => {
   }
 });
 
+// MOVIES: Cast list (see castSync.js for how this is populated from TVDB)
+app.get('/api/media/movies/:movieId/cast', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT a.id, a.name, a.image_path, c.character_name, c.sort_order
+       FROM metadata_movie_cast c
+       JOIN metadata_actors a ON a.id = c.actor_id
+       WHERE c.movie_id = $1
+       ORDER BY c.sort_order ASC, a.name ASC`,
+      [parseInt(req.params.movieId, 10)]
+    );
+    res.json({ cast: result.rows });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 // MOVIES: Get scraped entries linked to a movie profile (via metadata_items)
 app.get('/api/media/movies/:movieId/entries', async (req, res) => {
   const { movieId } = req.params;
   try {
     const entries = await pool.query(
-      `SELECT e.id, e.title, e.category, e.magnet_link, e.date_scraped
+      `SELECT e.id, e.title, e.category, e.magnet_link, e.size, e.date_scraped
        FROM scraped_entries e
        JOIN metadata_items i ON e.metadata_item_id = i.id
        WHERE i.movie_id = $1 AND i.type = 'movie'
@@ -123,6 +152,7 @@ app.get('/api/media/shows', async (req, res) => {
         first_aired_year: req.query.first_aired_year || '',
         original_country: req.query.original_country || '',
         original_language: req.query.original_language || '',
+        in_plex: req.query.in_plex || '',
       },
     });
 
@@ -172,15 +202,41 @@ app.get('/api/media/shows/:showId/profile', async (req, res) => {
   const { showId } = req.params;
   try {
     const result = await pool.query(
-      `SELECT id, tvdb_id, title, overview, poster_path, status, network, genres,
-              first_aired, last_aired, original_country, original_language
-       FROM metadata_shows WHERE id = $1`,
+      `SELECT s.id, s.tvdb_id, s.title, s.overview, s.poster_path, s.status, s.network, s.genres,
+              s.first_aired, s.last_aired, s.original_country, s.original_language,
+              s.in_plex, s.plex_checked_at, s.trailer_url, s.imdb_id,
+              pub.latest_published
+       FROM metadata_shows s
+       LEFT JOIN LATERAL (
+         SELECT MAX(e.date_published) AS latest_published
+         FROM metadata_items i
+         JOIN scraped_entries e ON e.metadata_item_id = i.id
+         WHERE i.show_id = s.id
+       ) pub ON true
+       WHERE s.id = $1`,
       [parseInt(showId, 10)]
     );
     if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Show not found' });
     }
     res.json({ show: result.rows[0] });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+// TV: Cast list (see castSync.js for how this is populated from TVDB)
+app.get('/api/media/shows/:showId/cast', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT a.id, a.name, a.image_path, c.character_name, c.sort_order
+       FROM metadata_show_cast c
+       JOIN metadata_actors a ON a.id = c.actor_id
+       WHERE c.show_id = $1
+       ORDER BY c.sort_order ASC, a.name ASC`,
+      [parseInt(req.params.showId, 10)]
+    );
+    res.json({ cast: result.rows });
   } catch (err) {
     sendError(res, err);
   }
@@ -205,7 +261,7 @@ app.get('/api/media/shows/:showId/season-packs', async (req, res) => {
   const { showId } = req.params;
   try {
     const packs = await pool.query(
-      `SELECT i.id, i.title, i.overview, s.season_number 
+      `SELECT i.id, i.title, i.overview, i.in_plex, s.season_number
        FROM metadata_items i
        JOIN metadata_seasons s ON i.season_id = s.id
        WHERE i.show_id = $1 AND i.type = 'season_pack'
@@ -224,7 +280,7 @@ app.get('/api/media/shows/:showId/episodes', async (req, res) => {
   const { showId } = req.params;
   try {
     const episodes = await pool.query(
-      `SELECT i.id, i.title, i.overview, i.episode_number, i.air_date, s.season_number 
+      `SELECT i.id, i.title, i.overview, i.episode_number, i.air_date, i.in_plex, s.season_number
        FROM metadata_items i
        JOIN metadata_seasons s ON i.season_id = s.id
        WHERE i.show_id = $1 AND i.type = 'episode'
@@ -243,7 +299,7 @@ app.get('/api/media/items/:itemId/entries', async (req, res) => {
   const { itemId } = req.params;
   try {
     const entries = await pool.query(
-      "SELECT id, title, category, magnet_link, date_scraped FROM scraped_entries WHERE metadata_item_id = $1 ORDER BY date_scraped DESC",
+      "SELECT id, title, category, magnet_link, size, date_scraped FROM scraped_entries WHERE metadata_item_id = $1 ORDER BY date_scraped DESC",
       [parseInt(itemId, 10)]
     );
     res.json({ entries: entries.rows });
@@ -259,7 +315,7 @@ app.get('/api/media/shows/:showId/seasons/:seasonNumber/pack-entries', async (re
   try {
     // Looks up entries attached to the 'season_pack' row for that precise show season
     const entries = await pool.query(
-      `SELECT e.id, e.title, e.category, e.magnet_link, e.date_scraped 
+      `SELECT e.id, e.title, e.category, e.magnet_link, e.size, e.date_scraped
        FROM scraped_entries e
        JOIN metadata_items i ON e.metadata_item_id = i.id
        JOIN metadata_seasons s ON i.season_id = s.id
@@ -338,9 +394,10 @@ app.post('/api/manual-match', async (req, res) => {
     const showRow = await pool.query(`
       INSERT INTO metadata_shows (
         tvdb_id, title, overview, poster_path, status, network, genres,
-        first_aired, last_aired, original_country, original_language
+        first_aired, last_aired, original_country, original_language,
+        trailer_url, imdb_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       ON CONFLICT (tvdb_id) DO UPDATE SET title = EXCLUDED.title RETURNING id
     `, [
       tvdb_id,
@@ -354,8 +411,10 @@ app.post('/api/manual-match', async (req, res) => {
       seriesMeta.last_aired,
       seriesMeta.original_country,
       seriesMeta.original_language,
+      seriesMeta.trailer_url,
+      seriesMeta.imdb_id,
     ]);
-    
+
     // Create an explicit structural placeholder pack item for manual fallback allocations
     const seasonRow = await pool.query(`
       INSERT INTO metadata_seasons (show_id, season_number, title)
@@ -370,6 +429,169 @@ app.post('/api/manual-match', async (req, res) => {
     await pool.query("UPDATE scraped_entries SET metadata_item_id = $1, match_status = 'matched' WHERE id = $2", [itemRow.rows[0].id, entry_id]);
     res.json({ success: true });
   } catch (error) {
+    sendError(res, error);
+  }
+});
+
+// ENTRIES: Fix Match — re-point a single raw scraped entry at the correct
+// TVDB series/season/episode or movie, WITHOUT touching whatever
+// episode/movie item it's currently (mis)attached to. Every other entry
+// still attached to that old item is left alone; we find-or-create the
+// correct target item and move only this one entry onto it.
+app.post('/api/entries/:entryId/fix-match', async (req, res) => {
+  const entryId = parseInt(req.params.entryId, 10);
+  const { type, tvdb_id } = req.body;
+
+  if (type !== 'movie' && type !== 'episode') {
+    return res.status(400).json({ error: "type must be 'movie' or 'episode'." });
+  }
+  if (!tvdb_id) {
+    return res.status(400).json({ error: 'A TVDB ID is required.' });
+  }
+
+  try {
+    const existingEntry = await pool.query('SELECT id FROM scraped_entries WHERE id = $1', [entryId]);
+    if (existingEntry.rowCount === 0) return res.status(404).json({ error: 'Entry not found.' });
+
+    let targetItemId;
+
+    if (type === 'movie') {
+      const details = await tvdb.getMovieDetails(tvdb_id);
+      if (!details) return res.status(404).json({ error: 'No movie found on TheTVDB for that ID.' });
+
+      const englishTranslation =
+        pickEnglishTranslation(details.translations) ||
+        (await tvdb.getMovieTranslation(tvdb_id));
+      const movieMeta = extractMovieFields(details, englishTranslation);
+
+      const movieRow = await pool.query(`
+        INSERT INTO metadata_movies (
+          tvdb_id, title, overview, poster_path, release_date, release_year,
+          genres, studios, production_companies, original_country, original_language,
+          trailer_url, imdb_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT (tvdb_id) DO UPDATE SET title = EXCLUDED.title
+        RETURNING id
+      `, [
+        tvdb_id,
+        movieMeta.title,
+        movieMeta.overview,
+        tvdb.normalizeImageUrl(movieMeta.poster_path),
+        movieMeta.release_date,
+        movieMeta.release_year,
+        movieMeta.genres,
+        movieMeta.studios,
+        movieMeta.production_companies,
+        movieMeta.original_country,
+        movieMeta.original_language,
+        movieMeta.trailer_url,
+        movieMeta.imdb_id,
+      ]);
+      const movieId = movieRow.rows[0].id;
+      await syncMovieCast(pool, tvdb, movieId, details);
+
+      const itemRow = await pool.query(`
+        INSERT INTO metadata_items (type, movie_id, title, overview)
+        VALUES ('movie', $1, $2, $3)
+        ON CONFLICT (movie_id) DO UPDATE SET
+          title = EXCLUDED.title,
+          overview = COALESCE(NULLIF(EXCLUDED.overview, ''), metadata_items.overview)
+        RETURNING id
+      `, [movieId, movieMeta.title, movieMeta.overview]);
+      targetItemId = itemRow.rows[0].id;
+
+    } else {
+      const { season, episode } = req.body;
+      if (season === undefined || season === null || season === '' || episode === undefined || episode === null || episode === '') {
+        return res.status(400).json({ error: 'Season and episode numbers are both required.' });
+      }
+      const seasonNum = parseInt(season, 10);
+      const episodeNum = parseInt(episode, 10);
+      if (Number.isNaN(seasonNum) || Number.isNaN(episodeNum)) {
+        return res.status(400).json({ error: 'Season and episode must be numbers.' });
+      }
+
+      const details = await tvdb.getSeriesDetails(tvdb_id);
+      if (!details) return res.status(404).json({ error: 'No series found on TheTVDB for that ID.' });
+
+      const englishTranslation =
+        pickEnglishTranslation(details.translations) ||
+        (await tvdb.getSeriesTranslation(tvdb_id));
+      const seriesMeta = extractSeriesFields(details, englishTranslation);
+
+      const showRow = await pool.query(`
+        INSERT INTO metadata_shows (
+          tvdb_id, title, overview, poster_path, status, network, genres,
+          first_aired, last_aired, original_country, original_language,
+          trailer_url, imdb_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT (tvdb_id) DO UPDATE SET title = EXCLUDED.title
+        RETURNING id
+      `, [
+        tvdb_id,
+        seriesMeta.title,
+        seriesMeta.overview,
+        tvdb.normalizeImageUrl(seriesMeta.poster_path),
+        seriesMeta.status,
+        seriesMeta.network,
+        seriesMeta.genres,
+        seriesMeta.first_aired,
+        seriesMeta.last_aired,
+        seriesMeta.original_country,
+        seriesMeta.original_language,
+        seriesMeta.trailer_url,
+        seriesMeta.imdb_id,
+      ]);
+      const showId = showRow.rows[0].id;
+      await syncShowCast(pool, tvdb, showId, details);
+
+      const seasonRow = await pool.query(`
+        INSERT INTO metadata_seasons (show_id, season_number)
+        VALUES ($1, $2)
+        ON CONFLICT (show_id, season_number) DO UPDATE SET season_number = EXCLUDED.season_number
+        RETURNING id
+      `, [showId, seasonNum]);
+      const seasonId = seasonRow.rows[0].id;
+
+      const epUrl = `${tvdb.baseUrl}/series/${tvdb_id}/episodes/default`;
+      const epRes = await require('axios').get(epUrl, {
+        headers: tvdb.getHeaders(),
+        params: { page: 0, season: seasonNum, episodeNumber: episodeNum }
+      });
+      const episodes = epRes.data.data?.episodes || [];
+      const matchEp = episodes.find(e => e.seasonNumber === seasonNum && e.number === episodeNum) || episodes[0];
+
+      const itemRow = await pool.query(`
+        INSERT INTO metadata_items (type, tvdb_id, show_id, season_id, episode_number, title, overview, air_date)
+        VALUES ('episode', $1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (show_id, season_id, episode_number) DO UPDATE SET
+          title = EXCLUDED.title,
+          overview = COALESCE(NULLIF(EXCLUDED.overview, ''), metadata_items.overview),
+          air_date = COALESCE(NULLIF(EXCLUDED.air_date, ''), metadata_items.air_date),
+          tvdb_id = COALESCE(NULLIF(EXCLUDED.tvdb_id, ''), metadata_items.tvdb_id)
+        RETURNING id
+      `, [
+        matchEp && matchEp.id ? String(matchEp.id) : null,
+        showId,
+        seasonId,
+        episodeNum,
+        matchEp ? (matchEp.name || `Episode ${episodeNum}`) : `Episode ${episodeNum}`,
+        matchEp ? matchEp.overview : '',
+        matchEp ? matchEp.aired : null,
+      ]);
+      targetItemId = itemRow.rows[0].id;
+    }
+
+    await pool.query(
+      "UPDATE scraped_entries SET metadata_item_id = $1, match_status = 'matched' WHERE id = $2",
+      [targetItemId, entryId]
+    );
+
+    res.json({ success: true, metadata_item_id: targetItemId });
+  } catch (error) {
+    console.error('Failed to fix entry match:', error.message);
     sendError(res, error);
   }
 });
@@ -442,6 +664,164 @@ app.post('/api/admin/force-sync', async (req, res) => {
   }
 });
 
+// API Route: Bulk-refresh TVDB metadata (title, overview, poster, genres,
+// language, trailer, IMDb link, and -- for shows -- a recomputed last
+// aired date) for every show and movie already matched in the catalog.
+app.post('/api/admin/tvdb-refresh', async (req, res) => {
+  try {
+    const summary = await refreshAllTvdbMetadata(pool, tvdb);
+    res.json({ success: true, ...summary });
+  } catch (error) {
+    console.error('TVDB metadata refresh failed:', error.message);
+    sendError(res, error);
+  }
+});
+
+// API Route: Clean up orphaned metadata records (see metadataCleanup.js for
+// the rules). Shared with the configurable scheduled job of the same name.
+app.post('/api/admin/cleanup-metadata', async (req, res) => {
+  try {
+    const summary = await cleanupOrphanedMetadata(pool);
+    res.json({ success: true, ...summary });
+  } catch (error) {
+    console.error('Metadata cleanup failed:', error.message);
+    sendError(res, error);
+  }
+});
+
+// API Route: List the configurable schedules backing each Admin Controls
+// automation button (Plex sync, TVDB refresh, pipeline match, metadata
+// cleanup), merged with their static labels from jobScheduler.js.
+app.get('/api/admin/scheduled-jobs', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT job_key, interval_minutes, is_enabled, last_run_at FROM scheduled_jobs ORDER BY job_key ASC'
+    );
+    const jobs = result.rows.map((row) => ({
+      ...row,
+      label: JOB_DEFINITIONS[row.job_key]?.label || row.job_key,
+    }));
+    res.json({ jobs });
+  } catch (error) {
+    console.error('Failed to fetch scheduled jobs:', error.message);
+    sendError(res, error);
+  }
+});
+
+// API Route: UPDATE a scheduled job's interval and enabled state
+app.put('/api/admin/scheduled-jobs/:jobKey', async (req, res) => {
+  const { jobKey } = req.params;
+  const { interval_minutes, is_enabled } = req.body;
+
+  if (!JOB_KEYS.includes(jobKey)) {
+    return res.status(404).json({ error: `Unknown job "${jobKey}".` });
+  }
+  const intervalNum = parseInt(interval_minutes, 10);
+  if (Number.isNaN(intervalNum) || intervalNum < 1) {
+    return res.status(400).json({ error: 'interval_minutes must be a positive number.' });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE scheduled_jobs SET interval_minutes = $1, is_enabled = $2 WHERE job_key = $3
+       RETURNING job_key, interval_minutes, is_enabled, last_run_at`,
+      [intervalNum, !!is_enabled, jobKey]
+    );
+    res.json({ success: true, job: { ...result.rows[0], label: JOB_DEFINITIONS[jobKey].label } });
+  } catch (error) {
+    console.error(`Failed to update scheduled job "${jobKey}":`, error.message);
+    sendError(res, error);
+  }
+});
+
+// API Route: Per-source health rollup for the Diagnostics panel — the most
+// recent error logged for each pipeline component (scraper, matcher,
+// scheduler:*, etc.) plus how many errors that source has logged in the
+// last hour/24h, so a stalled component (e.g. matcher erroring every cycle)
+// is obvious at a glance without reading raw log rows.
+app.get('/api/admin/diagnostics/summary', async (req, res) => {
+  try {
+    const latestPerSource = await pool.query(`
+      SELECT DISTINCT ON (source) source, level, message, created_at
+      FROM pipeline_logs
+      WHERE level = 'error'
+      ORDER BY source, created_at DESC
+    `);
+
+    const countsPerSource = await pool.query(`
+      SELECT source,
+        COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '1 hour')::int AS count_last_hour,
+        COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours')::int AS count_last_24h
+      FROM pipeline_logs
+      WHERE level = 'error'
+      GROUP BY source
+    `);
+
+    const countsBySource = Object.fromEntries(
+      countsPerSource.rows.map((row) => [row.source, row])
+    );
+
+    const sources = latestPerSource.rows.map((row) => ({
+      source: row.source,
+      last_error_message: row.message,
+      last_error_at: row.created_at,
+      count_last_hour: countsBySource[row.source]?.count_last_hour || 0,
+      count_last_24h: countsBySource[row.source]?.count_last_24h || 0,
+    }));
+
+    res.json({ sources });
+  } catch (error) {
+    console.error('Failed to fetch diagnostics summary:', error.message);
+    sendError(res, error);
+  }
+});
+
+// API Route: Raw pipeline log listing (the "log checker"), most recent
+// first. Optional ?source= and ?level= filters, ?limit= caps rows (max 500).
+app.get('/api/admin/logs', async (req, res) => {
+  const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 100));
+  const { source, level } = req.query;
+
+  const conditions = [];
+  const params = [];
+  if (source) {
+    params.push(source);
+    conditions.push(`source = $${params.length}`);
+  }
+  if (level) {
+    params.push(level);
+    conditions.push(`level = $${params.length}`);
+  }
+  const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  params.push(limit);
+
+  try {
+    const result = await pool.query(
+      `SELECT id, source, level, message, detail, created_at FROM pipeline_logs
+       ${whereClause}
+       ORDER BY created_at DESC
+       LIMIT $${params.length}`,
+      params
+    );
+    res.json({ logs: result.rows });
+  } catch (error) {
+    console.error('Failed to fetch pipeline logs:', error.message);
+    sendError(res, error);
+  }
+});
+
+// API Route: Clear the pipeline log (e.g. after resolving whatever was
+// causing the errors, to reset the Diagnostics view to a clean slate).
+app.delete('/api/admin/logs', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM pipeline_logs');
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Failed to clear pipeline logs:', error.message);
+    sendError(res, error);
+  }
+});
+
 // API Route: UPDATE Entry as ignored so metadata parsing bypasses it
 app.post('/api/admin/entries/:id/ignore', async (req, res) => {
   const { id } = req.params;
@@ -472,28 +852,34 @@ app.put('/api/admin/sources/:id', async (req, res) => {
   const { id } = req.params;
   const { name, url, interval_minutes, config, is_active } = req.body;
 
-  if (!name || !url || !interval_minutes || !config) {
-    return res.status(400).json({ error: "Name, url, interval_minutes, and config parameters are all required." });
+  // `!interval_minutes` would wrongly reject a legitimate 0 (falsy in JS —
+  // used by the "Find more from X" / "Initiate a Search" quick-search
+  // sources for "run on every tick"), so check for actually-missing instead
+  // of falsy.
+  const intervalProvided = interval_minutes !== undefined && interval_minutes !== null && interval_minutes !== '';
+  const intervalNum = parseInt(interval_minutes, 10);
+  if (!name || !url || !intervalProvided || Number.isNaN(intervalNum) || intervalNum < 0 || !config) {
+    return res.status(400).json({ error: "Name, url, interval_minutes (0 or greater), and config parameters are all required." });
   }
 
   try {
     const query = `
-      UPDATE scrape_sources 
-      SET 
-        name = $1, 
-        url = $2, 
-        interval_minutes = $3, 
+      UPDATE scrape_sources
+      SET
+        name = $1,
+        url = $2,
+        interval_minutes = $3,
         config_mapping = $4::jsonb,
         is_active = $5
       WHERE id = $6
       RETURNING id, name;
     `;
-    
+
     const result = await pool.query(query, [
-      name, 
-      url, 
-      parseInt(interval_minutes, 10), 
-      JSON.stringify(config), 
+      name,
+      url,
+      intervalNum,
+      JSON.stringify(config),
       is_active !== undefined ? is_active : true,
       parseInt(id, 10)
     ]);
@@ -501,12 +887,12 @@ app.put('/api/admin/sources/:id', async (req, res) => {
     if (result.rowCount === 0) {
       return res.status(404).json({ error: "Scraping source tracking entry not found." });
     }
-    
-    res.json({ 
-      success: true, 
-      message: "Source configuration successfully updated live.", 
-      id: result.rows[0].id, 
-      name: result.rows[0].name 
+
+    res.json({
+      success: true,
+      message: "Source configuration successfully updated live.",
+      id: result.rows[0].id,
+      name: result.rows[0].name
     });
   } catch (error) {
     console.error("Failed to update scraping source:", error.message);
@@ -517,13 +903,41 @@ app.put('/api/admin/sources/:id', async (req, res) => {
 // API Route: INSRT INTO scraping source with new configuration
 app.post('/api/admin/sources', async (req, res) => {
   const { name, url, interval_minutes, config } = req.body;
+  if (!url) {
+    return res.status(400).json({ error: 'url is required.' });
+  }
+
   try {
+    // Check first rather than leaning on the UNIQUE constraint catch below —
+    // url is the uniqueness factor (both here and for the main.jsx
+    // "Find more from X" / "Initiate a Search" quick-search buttons, whose
+    // URL is deterministic from the sanitized keyword, so re-searching the
+    // same title/keyword lands here every time). Checking up front means a
+    // duplicate is a normal "already exists" response instead of a failed
+    // write — and, since sendError now logs every API 500 to the
+    // Diagnostics tab, it also keeps that log free of non-error noise.
+    const existing = await pool.query('SELECT id, name FROM scrape_sources WHERE url = $1', [url]);
+    if (existing.rowCount > 0) {
+      return res.status(200).json({
+        success: true,
+        already_existed: true,
+        id: existing.rows[0].id,
+        name: existing.rows[0].name,
+      });
+    }
+
     const result = await pool.query(
       `INSERT INTO scrape_sources (name, url, interval_minutes, config_mapping) VALUES ($1, $2, $3, $4::jsonb) RETURNING id, name`,
       [name, url, interval_minutes, JSON.stringify(config)]
     );
     res.status(201).json({ success: true, id: result.rows[0].id, name: result.rows[0].name });
   } catch (error) {
+    // Fallback safety net for a race between two near-simultaneous requests
+    // for the same new URL (both pass the SELECT above before either INSERT
+    // commits) — should be rare given this is a single-admin internal tool.
+    if (error.code === '23505') {
+      return res.status(409).json({ error: 'A search source for this already exists in Ingestion Sources.' });
+    }
     sendError(res, error);
   }
 });
@@ -543,8 +957,14 @@ async function runPipeline() {
   try {
     await runScraper(pool);
     await processPendingMatches(pool, tvdb);
+    await runDueScheduledJobs(pool, tvdb);
   } catch (err) {
     console.error('Pipeline error:', err.message);
+    await logPipelineEvent(pool, {
+      source: 'pipeline',
+      message: `Pipeline tick aborted: ${err.message}`,
+      detail: err.stack,
+    });
   } finally {
     pipelineRunning = false;
   }
@@ -559,6 +979,7 @@ function schedulePipeline() {
 app.listen(port, async () => {
   try {
     await waitForDatabase(pool);
+    await ensureSchema(pool);
     console.log(`Harvest Backend listening at http://localhost:${port}`);
     schedulePipeline();
   } catch (err) {

@@ -1,47 +1,23 @@
 const { parseMediaTitle } = require('./mediaParser');
-const { pickEnglishTranslation, extractSeriesFields, extractMovieFields } = require('./tvdbMetadata');
-
-// How many entries to process per cycle. Keeping this low avoids hammering
-// the TVDB API and gives the scheduler room to breathe between ticks.
-const BATCH_SIZE = 5;
-
-// Minimum delay between consecutive TVDB API calls within a single batch (ms).
-// TVDB rate-limits requests per minute; 1500 ms gives ~40 calls/min headroom.
-const INTER_REQUEST_DELAY_MS = 1500;
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const { pickEnglishTranslation, extractSeriesFields, extractMovieFields, computeRecentAirDate } = require('./tvdbMetadata');
+const { logPipelineEvent } = require('./pipelineLog');
+const { syncShowCast, syncMovieCast } = require('./castSync');
 
 async function processPendingMatches(pool, tvdb) {
-  // --- GATE: check for pending work before touching the TVDB API ---
-  const countResult = await pool.query(
-    "SELECT COUNT(*)::int AS total FROM scraped_entries WHERE match_status = 'unmatched'"
-  );
-  const pendingCount = countResult.rows[0].total;
-
-  if (pendingCount === 0) {
-    console.log(`[${new Date().toISOString()}] Matcher: no unmatched entries, skipping TVDB cycle.`);
-    return;
-  }
-
-  console.log(`[${new Date().toISOString()}] Matcher: ${pendingCount} unmatched entries found, starting cycle (batch size: ${BATCH_SIZE})...`);
+  console.log(`[${new Date().toISOString()}] Running advanced metadata matching cycle...`);
 
   try {
     await tvdb.authenticate();
 
+    // ORDER BY guarantees FIFO processing — without it, Postgres doesn't
+    // promise which 10 rows come back on a given call, so a batch of
+    // never-clearing rows (see the `else` below) could keep crowding out
+    // newer entries from ever being selected at all.
     const pending = await pool.query(
-      `SELECT id, title, category, match_status FROM scraped_entries WHERE match_status = 'unmatched' LIMIT ${BATCH_SIZE}`
+      "SELECT id, title, category, match_status FROM scraped_entries WHERE match_status IN ('unmatched') ORDER BY id ASC LIMIT 10"
     );
 
-    for (let i = 0; i < pending.rows.length; i++) {
-      const entry = pending.rows[i];
-
-      // Pace requests — wait between entries (skip delay before the first one)
-      if (i > 0) {
-        await sleep(INTER_REQUEST_DELAY_MS);
-      }
-
+    for (const entry of pending.rows) {
       try {
         // Mark as processing so the UI can show in-flight entries
         await pool.query("UPDATE scraped_entries SET match_status = 'processing' WHERE id = $1", [entry.id]);
@@ -49,14 +25,10 @@ async function processPendingMatches(pool, tvdb) {
         const parsed = parseMediaTitle(entry.title, entry.category);
         console.log(`Parsed details: (${entry.match_status})`, parsed);
 
-        if (parsed.type !== 'series' && parsed.type !== 'movie') {
-          await pool.query("UPDATE scraped_entries SET match_status = 'ignored' WHERE id = $1", [entry.id]);
-          console.log(`Ignoring entry ID ${entry.id} — unrecognized media type: "${entry.title}"`);
-          continue;
-        } else if (parsed.type === 'unknown') {
+        if (parsed.type === 'unknown') {
           await pool.query("UPDATE scraped_entries SET match_status = 'failed' WHERE id = $1", [entry.id]);
           continue;
-        } 
+        }
 
         const searchParams = { q: parsed.title, type: parsed.type, limit: 1 };
         if (parsed.year) {
@@ -99,14 +71,17 @@ async function processPendingMatches(pool, tvdb) {
                 last_aired: null,
                 original_country: null,
                 original_language: null,
+                trailer_url: null,
+                imdb_id: null,
               };
 
           const showQuery = `
             INSERT INTO metadata_shows (
               tvdb_id, title, overview, poster_path, status, network, genres,
-              first_aired, last_aired, original_country, original_language
+              first_aired, last_aired, original_country, original_language,
+              trailer_url, imdb_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (tvdb_id) DO UPDATE SET
               title = EXCLUDED.title,
               overview = COALESCE(NULLIF(EXCLUDED.overview, ''), metadata_shows.overview),
@@ -115,9 +90,13 @@ async function processPendingMatches(pool, tvdb) {
               network = COALESCE(NULLIF(EXCLUDED.network, ''), metadata_shows.network),
               genres = CASE WHEN COALESCE(array_length(EXCLUDED.genres, 1), 0) > 0 THEN EXCLUDED.genres ELSE metadata_shows.genres END,
               first_aired = COALESCE(NULLIF(EXCLUDED.first_aired, ''), metadata_shows.first_aired),
+              -- Seed only: real, ongoing accuracy comes from computeRecentAirDate()
+              -- below once episodes are synced, which overwrites this unconditionally.
               last_aired = COALESCE(NULLIF(EXCLUDED.last_aired, ''), metadata_shows.last_aired),
               original_country = COALESCE(NULLIF(EXCLUDED.original_country, ''), metadata_shows.original_country),
-              original_language = COALESCE(NULLIF(EXCLUDED.original_language, ''), metadata_shows.original_language)
+              original_language = COALESCE(NULLIF(EXCLUDED.original_language, ''), metadata_shows.original_language),
+              trailer_url = COALESCE(NULLIF(EXCLUDED.trailer_url, ''), metadata_shows.trailer_url),
+              imdb_id = COALESCE(NULLIF(EXCLUDED.imdb_id, ''), metadata_shows.imdb_id)
             RETURNING id;
           `;
           const showRow = await pool.query(showQuery, [
@@ -132,8 +111,11 @@ async function processPendingMatches(pool, tvdb) {
             seriesMeta.last_aired,
             seriesMeta.original_country,
             seriesMeta.original_language,
+            seriesMeta.trailer_url,
+            seriesMeta.imdb_id,
           ]);
           const showId = showRow.rows[0].id;
+          await syncShowCast(pool, tvdb, showId, seriesDetails);
 
           // Step 3b: Ensure parent Season exists in `metadata_seasons`
           let seasonId = null;
@@ -148,21 +130,37 @@ async function processPendingMatches(pool, tvdb) {
             seasonId = seasonRow.rows[0].id;
           }
 
-          if (parsed.season !== null && parsed.episode !== null) {
+          if (parsed.is_dated_episode && parsed.air_date) {
             // ----------------------------------------
-            // CASE A.1: SINGLE EPISODE MATCHING
+            // CASE A.0: DATED EPISODE MATCHING
+            // Daily/talk shows (Jeopardy, Dateline NBC, etc.) are released
+            // with a calendar date instead of a season/episode number, so
+            // look the episode up by its air date rather than guessing a
+            // season/episode from those digits.
             // ----------------------------------------
-            console.log(`Found Series: "${rootAsset.name}" (ID: ${rootAsset.tvdb_id}). Fetching S${parsed.season}E${parsed.episode}...`);
-            
+            console.log(`Found Series: "${rootAsset.name}" (ID: ${rootAsset.tvdb_id}). Fetching episode aired ${parsed.air_date}...`);
+
             const epUrl = `${tvdb.baseUrl}/series/${rootAsset.tvdb_id}/episodes/default`;
             const epRes = await require('axios').get(epUrl, {
               headers: tvdb.getHeaders(),
-              params: { page: 0, season: parsed.season, episodeNumber: parsed.episode }
+              params: { page: 0, airDate: parsed.air_date }
             });
 
             const episodes = epRes.data.data?.episodes || [];
-            
-            const matchEp = episodes.find(e => e.seasonNumber === parsed.season && e.number === parsed.episode) || episodes[0];
+            const matchEp = episodes.find(e => e.aired === parsed.air_date) || episodes[0];
+
+            if (matchEp && matchEp.seasonNumber != null) {
+              const seasonQuery = `
+                INSERT INTO metadata_seasons (show_id, season_number)
+                VALUES ($1, $2)
+                ON CONFLICT (show_id, season_number) DO UPDATE SET season_number = EXCLUDED.season_number
+                RETURNING id;
+              `;
+              const seasonRow = await pool.query(seasonQuery, [showId, matchEp.seasonNumber]);
+              seasonId = seasonRow.rows[0].id;
+            }
+
+            const episodeNumber = matchEp ? matchEp.number : null;
 
             const itemQuery = `
               INSERT INTO metadata_items (type, tvdb_id, show_id, season_id, episode_number, title, overview, air_date)
@@ -174,7 +172,65 @@ async function processPendingMatches(pool, tvdb) {
                 tvdb_id = COALESCE(NULLIF(EXCLUDED.tvdb_id, ''), metadata_items.tvdb_id)
               RETURNING id;
             `;
-            
+
+            const itemRow = await pool.query(itemQuery, [
+              matchEp && matchEp.id ? String(matchEp.id) : null,
+              showId,
+              seasonId,
+              episodeNumber,
+              matchEp ? (matchEp.name || `Episode aired ${parsed.air_date}`) : `Episode aired ${parsed.air_date}`,
+              matchEp ? matchEp.overview : '',
+              matchEp ? matchEp.aired : parsed.air_date
+            ]);
+            finalMetadataId = itemRow.rows[0].id;
+
+            console.log(`Matched Episode ID ${matchEp ? matchEp.id : 'N/A'}: "${matchEp ? matchEp.name : parsed.air_date}" (Aired: ${matchEp ? matchEp.aired : parsed.air_date})`);
+
+            try {
+              const seriesEpisodes = await tvdb.getSeriesEpisodesExtended(rootAsset.tvdb_id);
+              const recentAirDate = computeRecentAirDate(seriesEpisodes);
+
+              if (recentAirDate) {
+                await pool.query(
+                  `UPDATE metadata_shows SET last_aired = $1 WHERE id = $2`,
+                  [recentAirDate, showId]
+                );
+                console.log(`Refreshed last_aired for show ID ${showId} ("${rootAsset.name}") -> ${recentAirDate}`);
+              }
+            } catch (airDateErr) {
+              console.error(`Failed to refresh last_aired for show ID ${showId}:`, airDateErr.message);
+            }
+
+          } else if (parsed.season !== null && parsed.episode !== null) {
+            // ----------------------------------------
+            // CASE A.1: SINGLE EPISODE MATCHING
+            // ----------------------------------------
+            console.log(`Found Series: "${rootAsset.name}" (ID: ${rootAsset.tvdb_id}). Fetching S${parsed.season}E${parsed.episode}...`);
+
+            const epUrl = `${tvdb.baseUrl}/series/${rootAsset.tvdb_id}/episodes/default`;
+            const epRes = await require('axios').get(epUrl, {
+              headers: tvdb.getHeaders(),
+              params: { page: 0, season: parsed.season, episodeNumber: parsed.episode }
+            });
+
+            const episodes = epRes.data.data?.episodes || [];
+
+            // Explicitly filter to ensure we grab the exact matching episode number and season matching our parsed values
+            const matchEp = episodes.find(e => e.seasonNumber === parsed.season && e.number === parsed.episode) || episodes[0];
+
+            // FIXED: Added 'air_date' column, values, and updates to the query sequence
+            const itemQuery = `
+              INSERT INTO metadata_items (type, tvdb_id, show_id, season_id, episode_number, title, overview, air_date)
+              VALUES ('episode', $1, $2, $3, $4, $5, $6, $7)
+              ON CONFLICT (show_id, season_id, episode_number) DO UPDATE SET
+                title = EXCLUDED.title,
+                overview = COALESCE(NULLIF(EXCLUDED.overview, ''), metadata_items.overview),
+                air_date = COALESCE(NULLIF(EXCLUDED.air_date, ''), metadata_items.air_date),
+                tvdb_id = COALESCE(NULLIF(EXCLUDED.tvdb_id, ''), metadata_items.tvdb_id)
+              RETURNING id;
+            `;
+
+            // FIXED: TVDB returns episode IDs as integers under '.id'; air dates are under '.aired'
             const itemRow = await pool.query(itemQuery, [
               matchEp && matchEp.id ? String(matchEp.id) : null,
               showId,
@@ -188,12 +244,36 @@ async function processPendingMatches(pool, tvdb) {
 
             console.log(`Matched Episode ID ${matchEp ? matchEp.id : 'N/A'}: "${matchEp ? matchEp.name : parsed.episode}" (Aired: ${matchEp ? matchEp.aired : 'N/A'})`);
 
+            // ----------------------------------------
+            // Refresh the show's recent air date.
+            // This is the new authoritative process: pull the series'
+            // full episode list and derive the most recent *actually
+            // aired* date from it, rather than trusting TVDB's own
+            // (often stale) `lastAired` field on the base series record.
+            // ----------------------------------------
+            try {
+              const seriesEpisodes = await tvdb.getSeriesEpisodesExtended(rootAsset.tvdb_id);
+              const recentAirDate = computeRecentAirDate(seriesEpisodes);
+
+              if (recentAirDate) {
+                await pool.query(
+                  `UPDATE metadata_shows SET last_aired = $1 WHERE id = $2`,
+                  [recentAirDate, showId]
+                );
+                console.log(`Refreshed last_aired for show ID ${showId} ("${rootAsset.name}") -> ${recentAirDate}`);
+              } else {
+                console.log(`No aired episodes found yet for show ID ${showId} ("${rootAsset.name}"); leaving last_aired unchanged.`);
+              }
+            } catch (airDateErr) {
+              console.error(`Failed to refresh last_aired for show ID ${showId}:`, airDateErr.message);
+            }
+
           } else if (parsed.season !== null) {
             // ----------------------------------------
             // CASE A.2: SEASON PACK MATCHING
             // ----------------------------------------
             console.log(`Found Series Pack: "${rootAsset.name}" (ID: ${rootAsset.tvdb_id}).`);
-            
+
             const itemQuery = `
               INSERT INTO metadata_items (type, tvdb_id, show_id, season_id, episode_number, title, overview, air_date)
               VALUES ('season_pack', $1, $2, $3, $4, $5, $6, $7)
@@ -201,10 +281,10 @@ async function processPendingMatches(pool, tvdb) {
               RETURNING id;
             `;
             const itemRow = await pool.query(itemQuery, [
-              null,
+              null, // Explicitly keeping it NULL as requested for complete season packs
               showId,
               seasonId,
-              0,    
+              0,
               `Season ${parsed.season} Pack`,
               `Full season pack release for Season ${parsed.season}`,
               null
@@ -214,7 +294,7 @@ async function processPendingMatches(pool, tvdb) {
             console.log(`Matched Season Pack: "${parsed.season}"`);
           }
 
-        } 
+        }
         // ==========================================
         // CASE B: IT'S A MOVIE
         // ==========================================
@@ -238,14 +318,17 @@ async function processPendingMatches(pool, tvdb) {
                 production_companies: [],
                 original_country: null,
                 original_language: null,
+                trailer_url: null,
+                imdb_id: null,
               };
 
           const movieProfileQuery = `
             INSERT INTO metadata_movies (
               tvdb_id, title, overview, poster_path, release_date, release_year,
-              genres, studios, production_companies, original_country, original_language
+              genres, studios, production_companies, original_country, original_language,
+              trailer_url, imdb_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (tvdb_id) DO UPDATE SET
               title = EXCLUDED.title,
               overview = COALESCE(NULLIF(EXCLUDED.overview, ''), metadata_movies.overview),
@@ -256,7 +339,9 @@ async function processPendingMatches(pool, tvdb) {
               studios = CASE WHEN COALESCE(array_length(EXCLUDED.studios, 1), 0) > 0 THEN EXCLUDED.studios ELSE metadata_movies.studios END,
               production_companies = CASE WHEN COALESCE(array_length(EXCLUDED.production_companies, 1), 0) > 0 THEN EXCLUDED.production_companies ELSE metadata_movies.production_companies END,
               original_country = COALESCE(NULLIF(EXCLUDED.original_country, ''), metadata_movies.original_country),
-              original_language = COALESCE(NULLIF(EXCLUDED.original_language, ''), metadata_movies.original_language)
+              original_language = COALESCE(NULLIF(EXCLUDED.original_language, ''), metadata_movies.original_language),
+              trailer_url = COALESCE(NULLIF(EXCLUDED.trailer_url, ''), metadata_movies.trailer_url),
+              imdb_id = COALESCE(NULLIF(EXCLUDED.imdb_id, ''), metadata_movies.imdb_id)
             RETURNING id;
           `;
           const movieProfileRow = await pool.query(movieProfileQuery, [
@@ -271,8 +356,11 @@ async function processPendingMatches(pool, tvdb) {
             movieMeta.production_companies,
             movieMeta.original_country,
             movieMeta.original_language,
+            movieMeta.trailer_url,
+            movieMeta.imdb_id,
           ]);
           const movieId = movieProfileRow.rows[0].id;
+          await syncMovieCast(pool, tvdb, movieId, movieDetails);
 
           const itemQuery = `
             INSERT INTO metadata_items (type, movie_id, title, overview)
@@ -295,15 +383,41 @@ async function processPendingMatches(pool, tvdb) {
             "UPDATE scraped_entries SET metadata_item_id = $1, match_status = 'matched' WHERE id = $2",
             [finalMetadataId, entry.id]
           );
+        } else {
+          // A TV-categorized title that didn't match the dated/S-E/season-pack
+          // cases above (or a movie search that somehow produced no usable
+          // metadata) falls through here with nothing to attach. Without this,
+          // match_status never leaves 'unmatched' and the same row gets
+          // reselected and silently no-op'd on every future cycle forever.
+          console.warn(`No matchable season/episode/pack info found for entry ID ${entry.id} ("${entry.title}") — marking failed.`);
+          await pool.query("UPDATE scraped_entries SET match_status = 'failed' WHERE id = $1", [entry.id]);
+          await logPipelineEvent(pool, {
+            source: 'matcher',
+            message: `Entry ${entry.id} ("${entry.title}") parsed as "${parsed.type}" but no season/episode/pack info was detected — no metadata item could be created.`,
+          });
         }
 
       } catch (err) {
         console.error(`Error matching entry ID ${entry.id}:`, err.message);
         await pool.query("UPDATE scraped_entries SET match_status = 'failed' WHERE id = $1", [entry.id]);
+        await logPipelineEvent(pool, {
+          source: 'matcher',
+          message: `Failed to match entry ${entry.id} ("${entry.title}"): ${err.message}`,
+          detail: err.stack,
+        });
       }
     }
   } catch (globalErr) {
     console.error("Global matcher error:", globalErr.message);
+    // This is the critical one to surface: if this fires every cycle (e.g.
+    // TVDB auth failing), the pending-entries query above never even runs,
+    // so nothing gets marked 'matched' OR 'failed' — scraping keeps working
+    // while matching silently stalls. See pipelineLog.js.
+    await logPipelineEvent(pool, {
+      source: 'matcher',
+      message: `Matching cycle aborted before processing any entries: ${globalErr.message}`,
+      detail: globalErr.stack,
+    });
   }
 }
 

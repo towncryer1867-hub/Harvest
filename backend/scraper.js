@@ -1,5 +1,7 @@
 const axios = require('axios');
 const { parseXMLFeed } = require('./parser');
+const { isTvCategory, isMovieCategory } = require('./mediaParser');
+const { logPipelineEvent } = require('./pipelineLog');
 
 function isSourceDue(source) {
   if (!source.last_run_at) return true;
@@ -39,15 +41,16 @@ async function runScraper(pool) {
         let insertedCount = 0;
 
         for (const entry of parsedEntries) {
+          console.log('entry category', entry.category);
           let forcedMatchStatus = 'unmatched';
-          if (entry.category !== 'TV Series' && entry.category !== 'Movie') {
+          if (!isTvCategory(entry.category) && !isMovieCategory(entry.category)) {
             forcedMatchStatus = 'ignored';
           }
           const insertQuery = `
-            INSERT INTO scraped_entries 
-              (source_id, title, source_link, category, description, magnet_link, date_published, match_status)
-            VALUES 
-              ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO scraped_entries
+              (source_id, title, source_link, category, description, magnet_link, date_published, match_status, size)
+            VALUES
+              ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (source_link) DO NOTHING
             RETURNING id;
           `;
@@ -60,7 +63,8 @@ async function runScraper(pool) {
             entry.description,
             entry.magnet_link,
             entry.date_published,
-            forcedMatchStatus
+            forcedMatchStatus,
+            entry.size
           ]);
 
           if (result.rowCount > 0) {
@@ -77,10 +81,20 @@ async function runScraper(pool) {
 
       } catch (sourceError) {
         console.error(`Error processing source "${source.name}":`, sourceError.message);
+        await logPipelineEvent(pool, {
+          source: 'scraper',
+          message: `Source "${source.name}" failed: ${sourceError.message}`,
+          detail: sourceError.stack,
+        });
       }
     }
   } catch (error) {
     console.error('Global scraper engine error:', error.message);
+    await logPipelineEvent(pool, {
+      source: 'scraper',
+      message: `Scraper cycle aborted: ${error.message}`,
+      detail: error.stack,
+    });
   }
 }
 

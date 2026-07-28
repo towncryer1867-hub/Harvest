@@ -51,6 +51,20 @@ function appendYearFilter(conditions, params, year, column) {
   conditions.push(`${column} = $${params.length}`);
 }
 
+/**
+ * Filters on the in_plex boolean column. Accepts:
+ *   'true'  -> only items found in Plex
+ *   'false' -> only items confirmed NOT in Plex (synced, but missing)
+ *   ''/undefined -> no filter (default)
+ * Anything else is ignored rather than throwing, so a bad query param
+ * degrades to "no filter" instead of a 500.
+ */
+function appendPlexFilter(conditions, params, value, column) {
+  if (value !== 'true' && value !== 'false') return;
+  params.push(value === 'true');
+  conditions.push(`${column} = $${params.length}`);
+}
+
 function seriesSortColumn(sort) {
   if (sort === 'release_date') return 's.last_aired';
   if (sort === 'published_date') return 'pub.latest_published';
@@ -58,7 +72,22 @@ function seriesSortColumn(sort) {
 }
 
 function movieSortColumn(sort) {
-  if (sort === 'release_date') return 'COALESCE(m.release_year::text, m.release_date)';
+  // Sort by the actual release_date when it's a real 'YYYY-MM-DD' value
+  // (movies matched/refreshed since tvdbMetadata.js started pulling
+  // first_release.date) so same-year titles order correctly by month/day
+  // instead of just clumping by year. Falls back to Jan 1 of release_year
+  // for older rows that haven't been refreshed yet (release_date still just
+  // a bare year string, or empty) — better than a random within-year order.
+  // The previous COALESCE(release_year::text, release_date) sorted by year
+  // alone whenever release_year was set, which is effectively always, so
+  // release_date was never actually used.
+  if (sort === 'release_date') {
+    return `CASE
+      WHEN m.release_date ~ '^\\d{4}-\\d{2}-\\d{2}$' THEN m.release_date::date
+      WHEN m.release_year IS NOT NULL THEN make_date(m.release_year, 1, 1)
+      ELSE NULL
+    END`;
+  }
   if (sort === 'published_date') return 'pub.latest_published';
   return 'm.title';
 }
@@ -82,6 +111,7 @@ function buildSeriesQuery(options) {
   }
   appendExactFilter(conditions, params, filters.original_country, 's.original_country');
   appendExactFilter(conditions, params, filters.original_language, 's.original_language');
+  appendPlexFilter(conditions, params, filters.in_plex, 's.in_plex');
 
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const sortCol = seriesSortColumn(sort);
@@ -98,6 +128,7 @@ function buildSeriesQuery(options) {
       s.id, s.tvdb_id, s.title, s.overview, s.poster_path,
       s.status, s.network, s.genres, s.first_aired, s.last_aired,
       s.original_country, s.original_language,
+      s.in_plex, s.plex_checked_at, s.trailer_url, s.imdb_id,
       pub.latest_published
     FROM metadata_shows s
     LEFT JOIN LATERAL (
@@ -139,6 +170,7 @@ function buildMoviesQuery(options) {
   appendYearFilter(conditions, params, filters.release_year, 'm.release_year');
   appendExactFilter(conditions, params, filters.original_country, 'm.original_country');
   appendExactFilter(conditions, params, filters.original_language, 'm.original_language');
+  appendPlexFilter(conditions, params, filters.in_plex, 'm.in_plex');
 
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const sortCol = movieSortColumn(sort);
@@ -155,6 +187,7 @@ function buildMoviesQuery(options) {
       m.id, m.tvdb_id, m.title, m.overview, m.poster_path, m.release_date,
       m.release_year, m.genres, m.studios, m.production_companies,
       m.original_country, m.original_language,
+      m.in_plex, m.plex_checked_at, m.trailer_url, m.imdb_id,
       pub.latest_published
     FROM metadata_movies m
     LEFT JOIN LATERAL (

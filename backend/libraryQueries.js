@@ -72,7 +72,22 @@ function seriesSortColumn(sort) {
 }
 
 function movieSortColumn(sort) {
-  if (sort === 'release_date') return 'COALESCE(m.release_year::text, m.release_date)';
+  // Sort by the actual release_date when it's a real 'YYYY-MM-DD' value
+  // (movies matched/refreshed since tvdbMetadata.js started pulling
+  // first_release.date) so same-year titles order correctly by month/day
+  // instead of just clumping by year. Falls back to Jan 1 of release_year
+  // for older rows that haven't been refreshed yet (release_date still just
+  // a bare year string, or empty) — better than a random within-year order.
+  // The previous COALESCE(release_year::text, release_date) sorted by year
+  // alone whenever release_year was set, which is effectively always, so
+  // release_date was never actually used.
+  if (sort === 'release_date') {
+    return `CASE
+      WHEN m.release_date ~ '^\\d{4}-\\d{2}-\\d{2}$' THEN m.release_date::date
+      WHEN m.release_year IS NOT NULL THEN make_date(m.release_year, 1, 1)
+      ELSE NULL
+    END`;
+  }
   if (sort === 'published_date') return 'pub.latest_published';
   return 'm.title';
 }

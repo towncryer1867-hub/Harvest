@@ -852,8 +852,14 @@ app.put('/api/admin/sources/:id', async (req, res) => {
   const { id } = req.params;
   const { name, url, interval_minutes, config, is_active } = req.body;
 
-  if (!name || !url || !interval_minutes || !config) {
-    return res.status(400).json({ error: "Name, url, interval_minutes, and config parameters are all required." });
+  // `!interval_minutes` would wrongly reject a legitimate 0 (falsy in JS —
+  // used by the "Find more from X" / "Initiate a Search" quick-search
+  // sources for "run on every tick"), so check for actually-missing instead
+  // of falsy.
+  const intervalProvided = interval_minutes !== undefined && interval_minutes !== null && interval_minutes !== '';
+  const intervalNum = parseInt(interval_minutes, 10);
+  if (!name || !url || !intervalProvided || Number.isNaN(intervalNum) || intervalNum < 0 || !config) {
+    return res.status(400).json({ error: "Name, url, interval_minutes (0 or greater), and config parameters are all required." });
   }
 
   try {
@@ -872,7 +878,7 @@ app.put('/api/admin/sources/:id', async (req, res) => {
     const result = await pool.query(query, [
       name,
       url,
-      parseInt(interval_minutes, 10),
+      intervalNum,
       JSON.stringify(config),
       is_active !== undefined ? is_active : true,
       parseInt(id, 10)
@@ -897,13 +903,41 @@ app.put('/api/admin/sources/:id', async (req, res) => {
 // API Route: INSRT INTO scraping source with new configuration
 app.post('/api/admin/sources', async (req, res) => {
   const { name, url, interval_minutes, config } = req.body;
+  if (!url) {
+    return res.status(400).json({ error: 'url is required.' });
+  }
+
   try {
+    // Check first rather than leaning on the UNIQUE constraint catch below —
+    // url is the uniqueness factor (both here and for the main.jsx
+    // "Find more from X" / "Initiate a Search" quick-search buttons, whose
+    // URL is deterministic from the sanitized keyword, so re-searching the
+    // same title/keyword lands here every time). Checking up front means a
+    // duplicate is a normal "already exists" response instead of a failed
+    // write — and, since sendError now logs every API 500 to the
+    // Diagnostics tab, it also keeps that log free of non-error noise.
+    const existing = await pool.query('SELECT id, name FROM scrape_sources WHERE url = $1', [url]);
+    if (existing.rowCount > 0) {
+      return res.status(200).json({
+        success: true,
+        already_existed: true,
+        id: existing.rows[0].id,
+        name: existing.rows[0].name,
+      });
+    }
+
     const result = await pool.query(
       `INSERT INTO scrape_sources (name, url, interval_minutes, config_mapping) VALUES ($1, $2, $3, $4::jsonb) RETURNING id, name`,
       [name, url, interval_minutes, JSON.stringify(config)]
     );
     res.status(201).json({ success: true, id: result.rows[0].id, name: result.rows[0].name });
   } catch (error) {
+    // Fallback safety net for a race between two near-simultaneous requests
+    // for the same new URL (both pass the SELECT above before either INSERT
+    // commits) — should be rare given this is a single-admin internal tool.
+    if (error.code === '23505') {
+      return res.status(409).json({ error: 'A search source for this already exists in Ingestion Sources.' });
+    }
     sendError(res, error);
   }
 });

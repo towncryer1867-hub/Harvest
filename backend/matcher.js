@@ -19,6 +19,9 @@ async function processPendingMatches(pool, tvdb) {
 
     for (const entry of pending.rows) {
       try {
+        // Mark as processing so the UI can show in-flight entries
+        await pool.query("UPDATE scraped_entries SET match_status = 'processing' WHERE id = $1", [entry.id]);
+
         const parsed = parseMediaTitle(entry.title, entry.category);
         console.log(`Parsed details: (${entry.match_status})`, parsed);
 

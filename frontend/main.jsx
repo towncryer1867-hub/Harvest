@@ -104,6 +104,55 @@ function buildQueryString(params) {
   return parts.length ? `?${parts.join('&')}` : '';
 }
 
+// Same selector schema dashboard.jsx defaults new manually-created sources
+// to, and that the seeded LimeTorrents sources in db-init/init.sql use.
+const STANDARD_SOURCE_CONFIG = {
+  parser: 'xml',
+  selectors: {
+    item: 'item',
+    title: 'title',
+    source_link: 'link',
+    date_published: 'pubDate',
+    category: 'category',
+    description: 'description',
+    magnet_link: 'enclosure',
+    size: 'size',
+  },
+};
+
+// Strips everything but letters/digits/whitespace, then collapses the
+// whitespace left behind by removed punctuation (e.g. "Spider-Man: Homecoming"
+// -> "SpiderMan Homecoming") so the LimeTorrents search URL gets a clean
+// keyword segment.
+function sanitizeSearchKeyword(raw) {
+  return (raw || '')
+    .replace(/[^a-zA-Z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Creates a one-off LimeTorrents search ingestion source for a raw
+// title/keyword (POST /api/admin/sources — the same endpoint the Sources
+// tab's manual "Deploy New Scraper Endpoint" form uses). `releaseYear`, when
+// given, is appended to the *sanitized* keyword before URL-encoding (movie
+// pages only — series pages and catalog keyword searches omit it). The
+// display name always uses the raw, unsanitized title/keyword.
+async function createQuickSearchSource(rawKeywordOrTitle, releaseYear = null) {
+  const sanitizedBase = sanitizeSearchKeyword(rawKeywordOrTitle);
+  const sanitizedKeyword = releaseYear ? `${sanitizedBase} ${releaseYear}`.trim() : sanitizedBase;
+
+  return fetchJson('/api/admin/sources', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: `LimeTorrents - Search: ${rawKeywordOrTitle}`,
+      url: `https://www.limetorrents.fun/searchrss/${encodeURIComponent(sanitizedKeyword)}/`,
+      interval_minutes: 0,
+      config: STANDARD_SOURCE_CONFIG,
+    }),
+  });
+}
+
 // Just the "Showing X-Y of Z" + Previous/Page/Next controls, with none of
 // the search/sort/letter/filter inputs — used standalone under the grid so
 // the footer doesn't repeat the full toolbar (see PaginationBar usage below).
@@ -329,6 +378,100 @@ function CastSection({ showId = null, movieId = null }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// "Find more from {title}" button shown under the poster on movie/series
+// detail pages. `releaseYear` is only ever passed on the movie page — see
+// createQuickSearchSource().
+function FindMoreButton({ rawTitle, releaseYear = null }) {
+  const [status, setStatus] = useState('idle'); // idle | working | done | exists | error
+  const [message, setMessage] = useState('');
+
+  const handleClick = async () => {
+    setStatus('working');
+    setMessage('');
+    try {
+      const data = await createQuickSearchSource(rawTitle, releaseYear);
+      if (data.already_existed) {
+        setStatus('exists');
+        setMessage(`A search source for "${rawTitle}" already exists in Ingestion Sources.`);
+      } else {
+        setStatus('done');
+        setMessage('Search source created — check Ingestion Sources in Admin Controls.');
+      }
+    } catch (err) {
+      setStatus('error');
+      setMessage(err.message);
+    }
+  };
+
+  return (
+    <div style={styles.findMoreWrap}>
+      <button
+        type="button"
+        style={styles.findMoreBtn}
+        onClick={handleClick}
+        disabled={status === 'working' || status === 'done' || status === 'exists'}
+      >
+        {status === 'working' ? 'Creating Search...'
+          : status === 'done' ? 'Search Source Created ✓'
+          : status === 'exists' ? 'Search Already Exists'
+          : `Find more from ${rawTitle}`}
+      </button>
+      {message && <p style={status === 'error' ? styles.errorText : styles.subText}>{message}</p>}
+    </div>
+  );
+}
+
+// Prompt shown above the catalog grid (below the toolbar's pagination bar)
+// whenever a keyword search is active, offering to spin up a dedicated
+// LimeTorrents search source for that exact keyword. Keyed by `keyword` at
+// the call site so its idle/done/error state resets whenever the search
+// term changes, instead of showing a stale "Search Source Created" after
+// the user searches for something else.
+function CatalogSearchPrompt({ keyword }) {
+  const [status, setStatus] = useState('idle');
+  const [message, setMessage] = useState('');
+
+  if (!keyword) return null;
+
+  const handleClick = async () => {
+    setStatus('working');
+    setMessage('');
+    try {
+      const data = await createQuickSearchSource(keyword);
+      if (data.already_existed) {
+        setStatus('exists');
+        setMessage(`A search source for "${keyword}" already exists in Ingestion Sources.`);
+      } else {
+        setStatus('done');
+        setMessage('Search source created — check Ingestion Sources in Admin Controls.');
+      }
+    } catch (err) {
+      setStatus('error');
+      setMessage(err.message);
+    }
+  };
+
+  return (
+    <div style={styles.catalogSearchPrompt}>
+      <p style={styles.catalogSearchPromptText}>
+        Would you like to find more results for "{keyword}"? Initiate a Search for {keyword}
+      </p>
+      <button
+        type="button"
+        style={styles.findMoreBtn}
+        onClick={handleClick}
+        disabled={status === 'working' || status === 'done' || status === 'exists'}
+      >
+        {status === 'working' ? 'Creating Search...'
+          : status === 'done' ? 'Search Source Created ✓'
+          : status === 'exists' ? 'Search Already Exists'
+          : 'Initiate a Search'}
+      </button>
+      {message && <p style={status === 'error' ? styles.errorText : styles.subText}>{message}</p>}
     </div>
   );
 }
@@ -786,6 +929,8 @@ function App() {
             onResetFilters={resetLibraryFilters}
           />
 
+          <CatalogSearchPrompt key={activeQueryFilters.search} keyword={activeQueryFilters.search} />
+
           <div style={styles.mediaGrid}>
             {libraryLoading && (mediaType === 'series' ? shows : movies).length === 0 ? (
               <div style={styles.emptyGridNotice}>Loading catalog entries...</div>
@@ -836,7 +981,10 @@ function App() {
         <div style={styles.detailContainer}>
           <button style={styles.backBtn} onClick={goToLibrary}>← Back to Library</button>
           <div style={styles.heroRow}>
-            <img src={selectedMovie.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={selectedMovie.title} style={styles.largePoster} />
+            <div style={styles.posterColumn}>
+              <img src={selectedMovie.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={selectedMovie.title} style={styles.largePoster} />
+              <FindMoreButton rawTitle={selectedMovie.title} releaseYear={selectedMovie.release_year} />
+            </div>
             <div style={styles.heroMeta}>
               <h1 style={styles.mainTitle}>{selectedMovie.title}</h1>
 
@@ -883,7 +1031,10 @@ function App() {
           {showDetailError && <div style={styles.errorBanner}>{showDetailError}</div>}
 
           <div style={styles.heroRow}>
-            <img src={selectedShow.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={selectedShow.title} style={styles.largePoster} />
+            <div style={styles.posterColumn}>
+              <img src={selectedShow.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={selectedShow.title} style={styles.largePoster} />
+              <FindMoreButton rawTitle={selectedShow.title} />
+            </div>
             <div style={styles.heroMeta}>
               <h1 style={styles.mainTitle}>{selectedShow.title}</h1>
 
@@ -1023,7 +1174,12 @@ const styles = {
   backBtn: { padding: '6px 12px', border: 'none', backgroundColor: 'transparent', color: '#0d6efd', fontWeight: '600', cursor: 'pointer', fontSize: '0.9rem', marginBottom: '20px', paddingLeft: 0 },
   heroRow: { display: 'flex', gap: '30px', marginBottom: '35px', borderBottom: '1px solid #e9ecef', paddingBottom: '25px' },
   largePoster: { width: '220px', height: '320px', objectFit: 'cover', borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.08)' },
+  posterColumn: { display: 'flex', flexDirection: 'column', gap: '10px', width: '220px' },
   heroMeta: { flex: 1 },
+  findMoreWrap: { display: 'flex', flexDirection: 'column', gap: '4px' },
+  findMoreBtn: { padding: '9px 14px', borderRadius: '6px', border: '1px solid #2c3e50', backgroundColor: '#fff', color: '#2c3e50', fontSize: '0.8rem', fontWeight: '700', cursor: 'pointer', textAlign: 'center' },
+  catalogSearchPrompt: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px', backgroundColor: '#f8f9fa', border: '1px solid #e9ecef', borderRadius: '8px', padding: '14px 18px', marginBottom: '16px' },
+  catalogSearchPromptText: { margin: 0, fontSize: '0.85rem', color: '#495057' },
   metaDatesRow: { display: 'flex', gap: '20px', marginBottom: '14px', flexWrap: 'wrap' },
   metaStatusBadge: { fontSize: '0.85rem', color: '#495057', backgroundColor: '#f8f9fa', border: '1px solid #e9ecef', borderRadius: '6px', padding: '6px 12px' },
   metaDateItem: { fontSize: '0.85rem', color: '#495057', backgroundColor: '#f8f9fa', border: '1px solid #e9ecef', borderRadius: '6px', padding: '6px 12px' },

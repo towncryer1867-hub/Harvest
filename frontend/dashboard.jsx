@@ -427,7 +427,13 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      alert(editingSourceId ? "Source configuration updated successfully!" : `Success! Source deployed with ID: ${data.id}`);
+      if (editingSourceId) {
+        alert("Source configuration updated successfully!");
+      } else if (data.already_existed) {
+        alert(`A source with this URL already exists: "${data.name}" (ID: ${data.id}). No duplicate was created.`);
+      } else {
+        alert(`Success! Source deployed with ID: ${data.id}`);
+      }
       resetForm();
       fetchData();
     } catch (err) {

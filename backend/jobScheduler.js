@@ -1,6 +1,7 @@
 const { syncPlexFlags } = require('./plexSync');
 const { refreshAllTvdbMetadata } = require('./tvdbRefresh');
 const { cleanupOrphanedMetadata } = require('./metadataCleanup');
+const { recheckUnmatchedWatchlist } = require('./watchlistRecheck');
 const { logPipelineEvent } = require('./pipelineLog');
 
 // One entry per schedulable automation button under Admin Controls ->
@@ -25,6 +26,10 @@ const JOB_DEFINITIONS = {
   metadata_cleanup: {
     label: 'Metadata Database Cleanup',
     run: (pool, tvdb) => cleanupOrphanedMetadata(pool),
+  },
+  watchlist_recheck: {
+    label: 'Watchlist Re-check',
+    run: (pool, tvdb) => recheckUnmatchedWatchlist(pool, tvdb),
   },
 };
 

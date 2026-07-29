@@ -4,6 +4,8 @@ import AdminDashboard from './dashboard'
 import { fetchJson } from './apiClient'
 import { readNavigation, writeNavigation, migrateLegacyNavigation } from './navigation'
 import { PlexBadge, plexPosterBadgeStyle } from './PlexBadge'
+import { WatchlistBadge, watchlistPosterBadgeStyle } from './WatchlistBadge'
+import { WatchlistPage } from './WatchlistPage'
 import { ResolutionBadge } from './ResolutionBadge'
 import { TrailerModal } from './TrailerModal'
 import { FixMatchModal } from './FixMatchModal'
@@ -728,6 +730,19 @@ function App() {
     setTrailerModalUrl(null);
   };
 
+  const goToWatchlist = () => {
+    writeNavigation({
+      view: 'watchlist',
+      movieId: null,
+      showId: null,
+      activeSeasonFilter: null,
+    });
+    setView('watchlist');
+    setSelectedMovie(null);
+    setSelectedShow(null);
+    setTrailerModalUrl(null);
+  };
+
   const setLibraryMediaType = (type) => {
     setMediaType(type);
     resetLibraryFilters();
@@ -805,6 +820,11 @@ function App() {
           return;
         }
 
+        if (nav.view === 'watchlist') {
+          setView('watchlist');
+          return;
+        }
+
         setView('library');
       } catch (err) {
         console.error("Error restoring navigation state:", err);
@@ -870,6 +890,20 @@ function App() {
     }
   };
 
+  // Watchlist "View in Library" links only carry a matched_movie_id /
+  // matched_show_id, not the full record handleSelectMovie/handleSelectShow
+  // expect — fetch the full record first, then hand off to the same
+  // navigation handlers a normal library card click uses.
+  const openMovieFromWatchlist = async (movieId) => {
+    const movie = await fetchMovieById(movieId);
+    if (movie) handleSelectMovie(movie);
+  };
+
+  const openShowFromWatchlist = async (showId) => {
+    const show = await fetchShowById(showId);
+    if (show) await loadShowDetail(show);
+  };
+
   const handleSeasonFilterChange = (seasonNumber) => {
     setActiveSeasonFilter(seasonNumber);
     writeNavigation({ activeSeasonFilter: seasonNumber });
@@ -891,8 +925,14 @@ function App() {
           Harvest Media Catalog
         </h2>
         <div style={{ display: 'flex', gap: '10px' }}>
-          <button style={view !== 'admin' ? styles.navActiveBtn : styles.navBtn} onClick={() => { goToLibrary(); }}>
+          <button
+            style={(view === 'library' || view === 'movie-detail' || view === 'show-detail') ? styles.navActiveBtn : styles.navBtn}
+            onClick={() => { goToLibrary(); }}
+          >
             Library Deck
+          </button>
+          <button style={view === 'watchlist' ? styles.navActiveBtn : styles.navBtn} onClick={goToWatchlist}>
+            Watchlist
           </button>
           <button style={view === 'admin' ? styles.navActiveBtn : styles.navBtn} onClick={goToAdmin}>
             Admin Controls
@@ -943,6 +983,7 @@ function App() {
                     <div style={styles.posterWrapper}>
                       <img src={show.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={show.title} style={styles.poster} />
                       <PlexBadge inPlex={show.in_plex} size="small" style={plexPosterBadgeStyle} />
+                      <WatchlistBadge inWatchlist={show.in_watchlist} size="small" style={watchlistPosterBadgeStyle} />
                     </div>
                     <div style={styles.cardInfo}>
                       <h4 style={styles.cardTitle}>{show.title}</h4>
@@ -959,6 +1000,7 @@ function App() {
                   <div style={styles.posterWrapper}>
                     <img src={movie.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={movie.title} style={styles.poster} />
                     <PlexBadge inPlex={movie.in_plex} size="small" style={plexPosterBadgeStyle} />
+                    <WatchlistBadge inWatchlist={movie.in_watchlist} size="small" style={watchlistPosterBadgeStyle} />
                   </div>
                   <div style={styles.cardInfo}>
                     <h4 style={styles.cardTitle}>{movie.title}</h4>
@@ -974,6 +1016,11 @@ function App() {
             <PaginationBar pagination={pagination} libraryLoading={libraryLoading} onFilterChange={handleLibraryFilterChange} />
           </div>
         </div>
+      )}
+
+      {/* VIEW: WATCHLIST */}
+      {view === 'watchlist' && (
+        <WatchlistPage onOpenMovie={openMovieFromWatchlist} onOpenShow={openShowFromWatchlist} />
       )}
 
       {/* VIEW B: UNIQUE MOVIE EXTENDED PROFILE VIEW */}

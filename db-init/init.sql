@@ -164,8 +164,35 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
 INSERT INTO scheduled_jobs (job_key, interval_minutes, is_enabled) VALUES
     ('plex_sync', 60, FALSE),
     ('tvdb_refresh', 1440, FALSE),
-    ('metadata_cleanup', 1440, FALSE)
+    ('metadata_cleanup', 1440, FALSE),
+    ('watchlist_recheck', 10080, TRUE)
 ON CONFLICT (job_key) DO NOTHING;
+
+-- 9. User-maintained watchlist of IMDB ids for movies/shows not necessarily
+-- in the scraped catalog yet. Enrichment (TVDB metadata + cross-link to
+-- metadata_movies/metadata_shows) happens in backend/watchlistMatcher.js,
+-- run once synchronously on insert and retried weekly for unmatched rows by
+-- the 'watchlist_recheck' scheduled job above (see backend/watchlistRecheck.js).
+CREATE TABLE IF NOT EXISTS watchlist (
+    id SERIAL PRIMARY KEY,
+    imdb_id VARCHAR(20) NOT NULL UNIQUE,
+    user_title VARCHAR(255) NOT NULL,
+    type VARCHAR(10) NOT NULL CHECK (type IN ('movie', 'show')),
+    -- TheTVDB match: stays NULL if TVDB has no remote-id match for this IMDB id.
+    tvdb_id VARCHAR(50),
+    tvdb_title VARCHAR(255),
+    poster_path TEXT,
+    release_date VARCHAR(50),
+    -- Library cross-reference: stays NULL until a metadata_* row with the
+    -- same tvdb_id exists (see matched_movie_id/matched_show_id join in
+    -- watchlistMatcher.js, same tvdb_id key plexSync.js uses).
+    matched_movie_id INT REFERENCES metadata_movies(id) ON DELETE SET NULL,
+    matched_show_id INT REFERENCES metadata_shows(id) ON DELETE SET NULL,
+    last_checked_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_watchlist_matched_movie ON watchlist(matched_movie_id);
+CREATE INDEX IF NOT EXISTS idx_watchlist_matched_show ON watchlist(matched_show_id);
 
 -- 8. Diagnostic event log for the background pipeline (scraper, matcher,
 -- Plex sync, TVDB refresh, cleanup, scheduled jobs). Lets Admin Controls

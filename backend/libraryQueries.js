@@ -129,6 +129,7 @@ function buildSeriesQuery(options) {
       s.status, s.network, s.genres, s.first_aired, s.last_aired,
       s.original_country, s.original_language,
       s.in_plex, s.plex_checked_at, s.trailer_url, s.imdb_id,
+      EXISTS(SELECT 1 FROM watchlist w WHERE w.matched_show_id = s.id) AS in_watchlist,
       pub.latest_published
     FROM metadata_shows s
     LEFT JOIN LATERAL (
@@ -188,6 +189,7 @@ function buildMoviesQuery(options) {
       m.release_year, m.genres, m.studios, m.production_companies,
       m.original_country, m.original_language,
       m.in_plex, m.plex_checked_at, m.trailer_url, m.imdb_id,
+      EXISTS(SELECT 1 FROM watchlist w WHERE w.matched_movie_id = m.id) AS in_watchlist,
       pub.latest_published
     FROM metadata_movies m
     LEFT JOIN LATERAL (

@@ -19,6 +19,8 @@ const { cleanupOrphanedMetadata } = require('./metadataCleanup');
 const { runDueScheduledJobs, JOB_DEFINITIONS, JOB_KEYS } = require('./jobScheduler');
 const { logPipelineEvent } = require('./pipelineLog');
 const { syncShowCast, syncMovieCast } = require('./castSync');
+const { parseWatchlistListQuery, buildWatchlistQuery } = require('./watchlistQueries');
+const { matchWatchlistItem } = require('./watchlistMatcher');
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -90,7 +92,8 @@ app.get('/api/media/movies/:movieId', async (req, res) => {
     const result = await pool.query(
       `SELECT id, tvdb_id, title, overview, poster_path, release_date, release_year,
               genres, studios, production_companies, original_country, original_language,
-              in_plex, plex_checked_at, trailer_url, imdb_id
+              in_plex, plex_checked_at, trailer_url, imdb_id,
+              EXISTS(SELECT 1 FROM watchlist w WHERE w.matched_movie_id = metadata_movies.id) AS in_watchlist
        FROM metadata_movies WHERE id = $1`,
       [parseInt(movieId, 10)]
     );
@@ -197,6 +200,105 @@ app.get('/api/media/filter-options', async (req, res) => {
   }
 });
 
+// =========================================================================
+// WATCHLIST API ENDPOINTS
+// =========================================================================
+
+const IMDB_ID_PATTERN = /^tt\d{7,9}$/i;
+
+// WATCHLIST: List entries with search, sort, type filter, and pagination
+app.get('/api/watchlist', async (req, res) => {
+  try {
+    const listQuery = parseWatchlistListQuery(req);
+    const built = buildWatchlistQuery(listQuery);
+
+    const [countResult, items] = await Promise.all([
+      pool.query(built.countSql, built.params),
+      pool.query(built.dataSql, built.dataParams),
+    ]);
+
+    const total = countResult.rows[0].total;
+    const { page, limit } = built.pagination;
+
+    res.json({
+      items: items.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: Math.max(1, Math.ceil(total / limit)),
+      },
+    });
+  } catch (err) {
+    console.error("Error fetching watchlist:", err.message);
+    sendError(res, err);
+  }
+});
+
+// WATCHLIST: Add an item by IMDB id. Only the ID's format is validated (no
+// live IMDB existence check — this is a single-user tool and the user is
+// typing the ID themselves); TheTVDB match + library cross-reference then
+// run synchronously so the response comes back fully enriched when
+// possible. If that enrichment fails, the row is still kept (unmatched) —
+// the weekly 'watchlist_recheck' job will retry it (see watchlistRecheck.js).
+app.post('/api/watchlist', async (req, res) => {
+  const { user_title, type, imdb_id } = req.body;
+
+  if (!user_title || !String(user_title).trim()) {
+    return res.status(400).json({ error: 'user_title is required.' });
+  }
+  if (type !== 'movie' && type !== 'show') {
+    return res.status(400).json({ error: "type must be 'movie' or 'show'." });
+  }
+  if (!imdb_id || !IMDB_ID_PATTERN.test(String(imdb_id).trim())) {
+    return res.status(400).json({ error: 'imdb_id must look like "tt1234567".' });
+  }
+  const normalizedImdbId = String(imdb_id).trim().toLowerCase();
+
+  try {
+    const existing = await pool.query('SELECT id FROM watchlist WHERE imdb_id = $1', [normalizedImdbId]);
+    if (existing.rowCount > 0) {
+      return res.status(409).json({ error: 'That IMDB id is already on your watchlist.' });
+    }
+
+    const inserted = await pool.query(
+      `INSERT INTO watchlist (imdb_id, user_title, type) VALUES ($1, $2, $3) RETURNING *`,
+      [normalizedImdbId, String(user_title).trim(), type]
+    );
+    let item = inserted.rows[0];
+
+    try {
+      item = await matchWatchlistItem(pool, tvdb, item);
+    } catch (matchErr) {
+      console.error(`Watchlist enrichment failed for new item ${item.id}:`, matchErr.message);
+      await logPipelineEvent(pool, {
+        source: 'watchlist',
+        message: `Enrichment failed for new watchlist item ${item.id} (${normalizedImdbId}): ${matchErr.message}`,
+        detail: matchErr.stack,
+      });
+    }
+
+    res.status(201).json({ success: true, item });
+  } catch (err) {
+    console.error("Error adding watchlist item:", err.message);
+    sendError(res, err);
+  }
+});
+
+// WATCHLIST: Remove an item
+app.delete('/api/watchlist/:id', async (req, res) => {
+  try {
+    const result = await pool.query('DELETE FROM watchlist WHERE id = $1 RETURNING id', [parseInt(req.params.id, 10)]);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Watchlist item not found.' });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error removing watchlist item:", err.message);
+    sendError(res, err);
+  }
+});
+
 // TV: Single show profile (for deep-link / navigation restore)
 app.get('/api/media/shows/:showId/profile', async (req, res) => {
   const { showId } = req.params;
@@ -205,6 +307,7 @@ app.get('/api/media/shows/:showId/profile', async (req, res) => {
       `SELECT s.id, s.tvdb_id, s.title, s.overview, s.poster_path, s.status, s.network, s.genres,
               s.first_aired, s.last_aired, s.original_country, s.original_language,
               s.in_plex, s.plex_checked_at, s.trailer_url, s.imdb_id,
+              EXISTS(SELECT 1 FROM watchlist w WHERE w.matched_show_id = s.id) AS in_watchlist,
               pub.latest_published
        FROM metadata_shows s
        LEFT JOIN LATERAL (

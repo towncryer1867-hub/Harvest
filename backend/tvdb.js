@@ -76,6 +76,31 @@ class TVDBClient {
   }
 
   /**
+   * Looks up a title by an external remote id (e.g. an IMDB id like
+   * "tt1234567") via TVDB's /search/remoteid/{remoteId} endpoint. Used by
+   * the watchlist feature, which only ever starts with an IMDB id rather
+   * than a text title. Returns TVDB's raw array of result wrappers (each
+   * shaped like { movie: {...} } or { series: {...} }, among other possible
+   * remote-id kinds), or [] if there's no match / the lookup failed.
+   */
+  async findByRemoteId(remoteId) {
+    if (!this.token) await this.authenticate();
+
+    try {
+      const response = await axios.get(`${this.baseUrl}/search/remoteid/${encodeURIComponent(remoteId)}`, {
+        headers: this.getHeaders(),
+      });
+      return response.data.data || [];
+    } catch (error) {
+      if (error.response?.status === 401) {
+        this.token = null;
+      }
+      console.error(`TVDB remote-id search error for "${remoteId}":`, error.message);
+      return [];
+    }
+  }
+
+  /**
    * Normalizes TVDB artwork paths to fully-qualified URLs.
    */
   normalizeImageUrl(url) {

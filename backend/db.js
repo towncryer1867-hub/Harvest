@@ -69,6 +69,52 @@ async function ensureSchema(pool) {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_watchlist_matched_show ON watchlist(matched_show_id);`);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS scheduler_items (
+      id SERIAL PRIMARY KEY,
+      type VARCHAR(10) NOT NULL CHECK (type IN ('movie', 'show')),
+      movie_id INT REFERENCES metadata_movies(id) ON DELETE CASCADE,
+      show_id INT REFERENCES metadata_shows(id) ON DELETE CASCADE,
+      resolution_preferences TEXT[] NOT NULL DEFAULT ARRAY['any']::TEXT[],
+      allow_season_packs BOOLEAN NOT NULL DEFAULT FALSE,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      CHECK (
+          (type = 'movie' AND movie_id IS NOT NULL AND show_id IS NULL) OR
+          (type = 'show'  AND show_id  IS NOT NULL AND movie_id IS NULL)
+      )
+    );
+  `);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduler_items_movie ON scheduler_items(movie_id) WHERE movie_id IS NOT NULL;`);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduler_items_show ON scheduler_items(show_id) WHERE show_id IS NOT NULL;`);
+  // Migrate the old single-value resolution_preference column (pre
+  // multi-select) to a resolution_preferences array, for installs that
+  // created scheduler_items before this change. Safe to run every boot:
+  // once resolution_preference is gone, every statement below is a no-op.
+  await pool.query(`ALTER TABLE scheduler_items ADD COLUMN IF NOT EXISTS resolution_preferences TEXT[];`);
+  await pool.query(`
+    UPDATE scheduler_items SET resolution_preferences = ARRAY[resolution_preference]
+    WHERE resolution_preferences IS NULL AND resolution_preference IS NOT NULL;
+  `).catch(() => {}); // resolution_preference column may already be gone
+  await pool.query(`
+    UPDATE scheduler_items SET resolution_preferences = ARRAY['any']::TEXT[]
+    WHERE resolution_preferences IS NULL OR array_length(resolution_preferences, 1) IS NULL;
+  `);
+  await pool.query(`ALTER TABLE scheduler_items ALTER COLUMN resolution_preferences SET DEFAULT ARRAY['any']::TEXT[];`);
+  await pool.query(`ALTER TABLE scheduler_items ALTER COLUMN resolution_preferences SET NOT NULL;`);
+  await pool.query(`ALTER TABLE scheduler_items DROP COLUMN IF EXISTS resolution_preference;`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS scheduler_log (
+      id SERIAL PRIMARY KEY,
+      scheduler_item_id INT NOT NULL REFERENCES scheduler_items(id) ON DELETE CASCADE,
+      metadata_item_id INT NOT NULL REFERENCES metadata_items(id) ON DELETE CASCADE,
+      resolution VARCHAR(10),
+      downloaded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(scheduler_item_id, metadata_item_id)
+    );
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS pipeline_logs (
       id SERIAL PRIMARY KEY,
       source VARCHAR(50) NOT NULL,
@@ -112,7 +158,7 @@ async function ensureSchema(pool) {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_metadata_show_cast_show_id ON metadata_show_cast(show_id);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_metadata_movie_cast_movie_id ON metadata_movie_cast(movie_id);`);
 
-  console.log('Schema check complete (size, trailer_url, imdb_id, scheduled_jobs, pipeline_logs, cast tables, watchlist ensured).');
+  console.log('Schema check complete (size, trailer_url, imdb_id, scheduled_jobs, pipeline_logs, cast tables, watchlist, scheduler ensured).');
 }
 
 module.exports = { waitForDatabase, ensureSchema };

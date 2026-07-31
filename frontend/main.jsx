@@ -6,6 +6,9 @@ import { readNavigation, writeNavigation, migrateLegacyNavigation } from './navi
 import { PlexBadge, plexPosterBadgeStyle } from './PlexBadge'
 import { WatchlistBadge, watchlistPosterBadgeStyle } from './WatchlistBadge'
 import { WatchlistPage } from './WatchlistPage'
+import { SchedulerBadge, schedulerPosterBadgeStyle } from './SchedulerBadge'
+import { SchedulerPage } from './SchedulerPage'
+import { AddToSchedulerModal } from './AddToSchedulerModal'
 import { ResolutionBadge } from './ResolutionBadge'
 import { TrailerModal } from './TrailerModal'
 import { FixMatchModal } from './FixMatchModal'
@@ -427,6 +430,44 @@ function FindMoreButton({ rawTitle, releaseYear = null }) {
   );
 }
 
+// "Add to Scheduler" / "Edit Scheduler" button shown under the poster on
+// movie/series detail pages, above FindMoreButton. Toggles between create
+// and edit mode based on whether this entity already has a scheduler_items
+// row (schedulerItemId) — the backend's unique index on show_id makes a
+// second "create" impossible anyway, so this keeps the UI honest. Shows
+// only — movie scheduling has been removed from the product surface.
+function AddToSchedulerButton({
+  entityId, title,
+  schedulerItemId, schedulerEnabled, schedulerResolutionPreferences, schedulerAllowSeasonPacks,
+  onSaved,
+}) {
+  const [showModal, setShowModal] = useState(false);
+  const isScheduled = !!schedulerItemId;
+
+  return (
+    <>
+      <button type="button" style={styles.schedulerBtn} onClick={() => setShowModal(true)}>
+        {isScheduled ? (schedulerEnabled ? 'Edit Scheduler ✓' : 'Edit Scheduler (Paused)') : 'Add to Scheduler'}
+      </button>
+      {showModal && (
+        <AddToSchedulerModal
+          mode={isScheduled ? 'edit' : 'create'}
+          entityId={entityId}
+          title={title}
+          item={isScheduled ? {
+            id: schedulerItemId,
+            resolution_preferences: schedulerResolutionPreferences,
+            allow_season_packs: schedulerAllowSeasonPacks,
+            enabled: schedulerEnabled,
+          } : null}
+          onClose={() => setShowModal(false)}
+          onSaved={onSaved}
+        />
+      )}
+    </>
+  );
+}
+
 // Prompt shown above the catalog grid (below the toolbar's pagination bar)
 // whenever a keyword search is active, offering to spin up a dedicated
 // LimeTorrents search source for that exact keyword. Keyed by `keyword` at
@@ -743,6 +784,19 @@ function App() {
     setTrailerModalUrl(null);
   };
 
+  const goToScheduler = () => {
+    writeNavigation({
+      view: 'scheduler',
+      movieId: null,
+      showId: null,
+      activeSeasonFilter: null,
+    });
+    setView('scheduler');
+    setSelectedMovie(null);
+    setSelectedShow(null);
+    setTrailerModalUrl(null);
+  };
+
   const setLibraryMediaType = (type) => {
     setMediaType(type);
     resetLibraryFilters();
@@ -825,6 +879,11 @@ function App() {
           return;
         }
 
+        if (nav.view === 'scheduler') {
+          setView('scheduler');
+          return;
+        }
+
         setView('library');
       } catch (err) {
         console.error("Error restoring navigation state:", err);
@@ -883,7 +942,15 @@ function App() {
 
   const handleSelectShow = async (show) => {
     try {
-      await loadShowDetail(show);
+      // The library grid's list endpoint doesn't include the scheduler
+      // detail fields (scheduler_item_id/scheduler_resolution_preferences/
+      // scheduler_allow_season_packs — only in_scheduler/scheduler_enabled,
+      // for the badge), so fetch the full profile first — otherwise
+      // AddToSchedulerButton would show "Add to Scheduler" even for an
+      // already-scheduled show until the page is reloaded. Same pattern
+      // openShowFromWatchlist and the nav-restore path already use.
+      const fullShow = await fetchShowById(show.id);
+      await loadShowDetail(fullShow || show);
     } catch (err) {
       console.error("Error building hierarchy context:", err);
       setShowDetailError(err.message);
@@ -902,6 +969,16 @@ function App() {
   const openShowFromWatchlist = async (showId) => {
     const show = await fetchShowById(showId);
     if (show) await loadShowDetail(show);
+  };
+
+  const handleShowSchedulerSaved = (item) => {
+    setSelectedShow((prev) => prev && ({
+      ...prev,
+      scheduler_item_id: item.id,
+      scheduler_enabled: item.enabled,
+      scheduler_resolution_preferences: item.resolution_preferences,
+      scheduler_allow_season_packs: item.allow_season_packs,
+    }));
   };
 
   const handleSeasonFilterChange = (seasonNumber) => {
@@ -933,6 +1010,9 @@ function App() {
           </button>
           <button style={view === 'watchlist' ? styles.navActiveBtn : styles.navBtn} onClick={goToWatchlist}>
             Watchlist
+          </button>
+          <button style={view === 'scheduler' ? styles.navActiveBtn : styles.navBtn} onClick={goToScheduler}>
+            Scheduler
           </button>
           <button style={view === 'admin' ? styles.navActiveBtn : styles.navBtn} onClick={goToAdmin}>
             Admin Controls
@@ -984,6 +1064,7 @@ function App() {
                       <img src={show.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={show.title} style={styles.poster} />
                       <PlexBadge inPlex={show.in_plex} size="small" style={plexPosterBadgeStyle} />
                       <WatchlistBadge inWatchlist={show.in_watchlist} size="small" style={watchlistPosterBadgeStyle} />
+                      <SchedulerBadge inScheduler={show.in_scheduler} enabled={show.scheduler_enabled} size="small" style={schedulerPosterBadgeStyle} />
                     </div>
                     <div style={styles.cardInfo}>
                       <h4 style={styles.cardTitle}>{show.title}</h4>
@@ -1001,6 +1082,7 @@ function App() {
                     <img src={movie.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={movie.title} style={styles.poster} />
                     <PlexBadge inPlex={movie.in_plex} size="small" style={plexPosterBadgeStyle} />
                     <WatchlistBadge inWatchlist={movie.in_watchlist} size="small" style={watchlistPosterBadgeStyle} />
+                    <SchedulerBadge inScheduler={movie.in_scheduler} enabled={movie.scheduler_enabled} size="small" style={schedulerPosterBadgeStyle} />
                   </div>
                   <div style={styles.cardInfo}>
                     <h4 style={styles.cardTitle}>{movie.title}</h4>
@@ -1021,6 +1103,11 @@ function App() {
       {/* VIEW: WATCHLIST */}
       {view === 'watchlist' && (
         <WatchlistPage onOpenMovie={openMovieFromWatchlist} onOpenShow={openShowFromWatchlist} />
+      )}
+
+      {/* VIEW: SCHEDULER */}
+      {view === 'scheduler' && (
+        <SchedulerPage onOpenShow={openShowFromWatchlist} />
       )}
 
       {/* VIEW B: UNIQUE MOVIE EXTENDED PROFILE VIEW */}
@@ -1080,6 +1167,15 @@ function App() {
           <div style={styles.heroRow}>
             <div style={styles.posterColumn}>
               <img src={selectedShow.poster_path || 'https://via.placeholder.com/200x300?text=No+Poster'} alt={selectedShow.title} style={styles.largePoster} />
+              <AddToSchedulerButton
+                entityId={selectedShow.id}
+                title={selectedShow.title}
+                schedulerItemId={selectedShow.scheduler_item_id}
+                schedulerEnabled={selectedShow.scheduler_enabled}
+                schedulerResolutionPreferences={selectedShow.scheduler_resolution_preferences}
+                schedulerAllowSeasonPacks={selectedShow.scheduler_allow_season_packs}
+                onSaved={handleShowSchedulerSaved}
+              />
               <FindMoreButton rawTitle={selectedShow.title} />
             </div>
             <div style={styles.heroMeta}>
@@ -1225,6 +1321,7 @@ const styles = {
   heroMeta: { flex: 1 },
   findMoreWrap: { display: 'flex', flexDirection: 'column', gap: '4px' },
   findMoreBtn: { padding: '9px 14px', borderRadius: '6px', border: '1px solid #2c3e50', backgroundColor: '#fff', color: '#2c3e50', fontSize: '0.8rem', fontWeight: '700', cursor: 'pointer', textAlign: 'center' },
+  schedulerBtn: { padding: '9px 14px', borderRadius: '6px', border: '1px solid #b45309', backgroundColor: '#fff', color: '#b45309', fontSize: '0.8rem', fontWeight: '700', cursor: 'pointer', textAlign: 'center' },
   catalogSearchPrompt: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px', backgroundColor: '#f8f9fa', border: '1px solid #e9ecef', borderRadius: '8px', padding: '14px 18px', marginBottom: '16px' },
   catalogSearchPromptText: { margin: 0, fontSize: '0.85rem', color: '#495057' },
   metaDatesRow: { display: 'flex', gap: '20px', marginBottom: '14px', flexWrap: 'wrap' },

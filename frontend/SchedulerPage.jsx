@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { fetchJson } from './apiClient';
 import { AddToSchedulerModal } from './AddToSchedulerModal';
+import { RESOLUTION_OPTIONS, resolutionLabel } from './resolutionOptions';
 
 const PAGE_SIZE = 24;
 const PLACEHOLDER_POSTER = 'https://via.placeholder.com/200x300?text=No+Poster';
@@ -19,7 +20,7 @@ function formatDateOnly(value) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-const DEFAULT_FILTERS = { search: '', sort: 'added', order: 'desc', page: 1 };
+const DEFAULT_FILTERS = { search: '', sort: 'added', order: 'desc', resolution: '', page: 1 };
 
 /**
  * Standalone Scheduler grid page — mirrors WatchlistPage.jsx's shape
@@ -48,6 +49,7 @@ export function SchedulerPage({ onOpenShow }) {
         search: nextFilters.search,
         sort: nextFilters.sort,
         order: nextFilters.order,
+        resolution: nextFilters.resolution,
       });
       const data = await fetchJson(`/api/scheduler${query}`);
       setItems(data.items || []);
@@ -122,6 +124,16 @@ export function SchedulerPage({ onOpenShow }) {
             <option value="desc">Descending</option>
             <option value="asc">Ascending</option>
           </select>
+          <select
+            style={styles.select}
+            value={filters.resolution}
+            onChange={(e) => handleFilterChange({ resolution: e.target.value, page: 1 })}
+          >
+            <option value="">All Resolutions</option>
+            {RESOLUTION_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -160,13 +172,17 @@ export function SchedulerPage({ onOpenShow }) {
                 <div style={styles.cardInfo}>
                   <h4 style={styles.cardTitle}>{item.title}</h4>
                   <div style={styles.metaRow}>
-                    <span style={styles.typeBadge}>{item.type === 'movie' ? 'Movie' : 'TV Show'}</span>
                     {item.type === 'movie' && item.release_date && (
                       <span style={styles.dateBadge}>{item.release_date}</span>
                     )}
                     {item.type === 'show' && (
                       <span style={styles.dateBadge}>{lastDownloaded ? `Last downloaded: ${lastDownloaded}` : 'Never downloaded'}</span>
                     )}
+                  </div>
+                  <div style={styles.metaRow}>
+                    {(item.resolution_preferences || []).map((res) => (
+                      <span key={res} style={styles.resolutionBadge}>{resolutionLabel(res)}</span>
+                    ))}
                   </div>
                   <button
                     type="button"
@@ -249,8 +265,8 @@ const styles = {
   cardInfo: { padding: '12px', display: 'flex', flexDirection: 'column', gap: '8px' },
   cardTitle: { margin: 0, fontSize: '0.9rem', fontWeight: '700', color: '#2c3e50', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   metaRow: { display: 'flex', gap: '6px', flexWrap: 'wrap' },
-  typeBadge: { display: 'inline-block', backgroundColor: '#e9ecef', padding: '2px 6px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: '600', color: '#495057' },
   dateBadge: { display: 'inline-block', backgroundColor: '#eef2ff', color: '#3730a3', padding: '2px 6px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: '600' },
+  resolutionBadge: { display: 'inline-block', backgroundColor: '#e7f1ff', color: '#1d4ed8', padding: '2px 6px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: '600', border: '1px solid #bfdbfe' },
   libraryLinkBtn: { padding: 0, border: 'none', background: 'none', color: '#0d6efd', fontWeight: '700', fontSize: '0.75rem', cursor: 'pointer', textAlign: 'left' },
   paginationBar: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', paddingTop: '4px', borderTop: '1px solid #f1f3f5' },
   paginationMeta: { fontSize: '0.8rem', color: '#6c757d' },

@@ -4,10 +4,29 @@ const { logPipelineEvent } = require('./pipelineLog');
 const { syncShowCast, syncMovieCast } = require('./castSync');
 const { buildQBittorrentClientFromEnv } = require('./qbittorrentClient');
 const { evaluateSchedulerTrigger } = require('./schedulerTrigger');
+const { buildPlexClientFromEnv, buildPlexIndex, checkEntityInPlex } = require('./plexSync');
 
 async function processPendingMatches(pool, tvdb) {
   console.log(`[${new Date().toISOString()}] Running advanced metadata matching cycle...`);
   const qbClient = buildQBittorrentClientFromEnv();
+
+  // Built once per cycle (not per entry) so up to 10 matches this tick share
+  // one Plex library fetch instead of re-walking every section per entry.
+  // syncPlexFlags (the scheduled job) still runs independently to catch
+  // titles added to Plex between matching cycles.
+  const plexClient = buildPlexClientFromEnv();
+  let plexIndex = null;
+  if (plexClient.isConfigured()) {
+    try {
+      plexIndex = await buildPlexIndex(plexClient);
+    } catch (err) {
+      console.error('Failed to build Plex index for match-time check:', err.message);
+      await logPipelineEvent(pool, {
+        source: 'matcher',
+        message: `Plex lookup unavailable for this matching cycle: ${err.message}`,
+      });
+    }
+  }
 
   try {
     await tvdb.authenticate();
@@ -55,6 +74,8 @@ async function processPendingMatches(pool, tvdb) {
         let triggerEntityType = null;
         let triggerShowId = null;
         let triggerMovieId = null;
+        let triggerSeasonNumber = null;
+        let triggerEpisodeNumber = null;
 
         // ==========================================
         // CASE A: IT'S A TV SHOW (EPISODE OR SEASON PACK)
@@ -191,6 +212,8 @@ async function processPendingMatches(pool, tvdb) {
             finalMetadataId = itemRow.rows[0].id;
             triggerEntityType = 'episode';
             triggerShowId = showId;
+            triggerSeasonNumber = matchEp ? matchEp.seasonNumber : null;
+            triggerEpisodeNumber = episodeNumber;
 
             console.log(`Matched Episode ID ${matchEp ? matchEp.id : 'N/A'}: "${matchEp ? matchEp.name : parsed.air_date}" (Aired: ${matchEp ? matchEp.aired : parsed.air_date})`);
 
@@ -251,6 +274,8 @@ async function processPendingMatches(pool, tvdb) {
             finalMetadataId = itemRow.rows[0].id;
             triggerEntityType = 'episode';
             triggerShowId = showId;
+            triggerSeasonNumber = parsed.season;
+            triggerEpisodeNumber = parsed.episode;
 
             console.log(`Matched Episode ID ${matchEp ? matchEp.id : 'N/A'}: "${matchEp ? matchEp.name : parsed.episode}" (Aired: ${matchEp ? matchEp.aired : 'N/A'})`);
 
@@ -302,6 +327,7 @@ async function processPendingMatches(pool, tvdb) {
             finalMetadataId = itemRow.rows[0].id;
             triggerEntityType = 'season_pack';
             triggerShowId = showId;
+            triggerSeasonNumber = parsed.season;
 
             console.log(`Matched Season Pack: "${parsed.season}"`);
           }
@@ -397,6 +423,27 @@ async function processPendingMatches(pool, tvdb) {
             "UPDATE scraped_entries SET metadata_item_id = $1, match_status = 'matched' WHERE id = $2",
             [finalMetadataId, entry.id]
           );
+
+          if (plexIndex && triggerEntityType) {
+            try {
+              await checkEntityInPlex(pool, plexClient, plexIndex, {
+                entityType: triggerEntityType,
+                tvdbId: rootAsset.tvdb_id,
+                metadataItemId: finalMetadataId,
+                showId: triggerShowId,
+                movieId: triggerMovieId,
+                seasonNumber: triggerSeasonNumber,
+                episodeNumber: triggerEpisodeNumber,
+              });
+            } catch (plexErr) {
+              console.error(`Plex check failed for entry ID ${entry.id}:`, plexErr.message);
+              await logPipelineEvent(pool, {
+                source: 'matcher',
+                message: `Plex check failed for entry ${entry.id} ("${entry.title}"): ${plexErr.message}`,
+                detail: plexErr.stack,
+              });
+            }
+          }
 
           if (triggerEntityType) {
             try {

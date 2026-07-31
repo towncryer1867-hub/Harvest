@@ -8,6 +8,59 @@ function buildPlexClientFromEnv() {
 }
 
 /**
+ * Fetches every movie/show in the configured Plex sections and indexes them
+ * by TVDB id. Shared by the full scheduled sync (syncPlexFlags) and the
+ * match-time single-entity check (checkEntityInPlex) so both use identical
+ * matching rules and neither duplicates the section-walking logic.
+ */
+async function buildPlexIndex(plexClient) {
+  const errors = [];
+  const sections = await plexClient.getSections();
+
+  const tvSectionFilter = process.env.PLEX_TV_SECTION_ID ? String(process.env.PLEX_TV_SECTION_ID) : null;
+  const movieSectionFilter = process.env.PLEX_MOVIE_SECTION_ID ? String(process.env.PLEX_MOVIE_SECTION_ID) : null;
+
+  const tvSections = sections.filter(
+    (s) => s.type === 'show' && (!tvSectionFilter || String(s.key) === tvSectionFilter)
+  );
+  const movieSections = sections.filter(
+    (s) => s.type === 'movie' && (!movieSectionFilter || String(s.key) === movieSectionFilter)
+  );
+
+  if (tvSections.length === 0 && movieSections.length === 0) {
+    errors.push('No matching TV or Movie sections found on the Plex server.');
+  }
+
+  const moviesByTvdb = new Map();
+  for (const section of movieSections) {
+    try {
+      const items = await plexClient.getSectionItems(section.key);
+      for (const item of items) {
+        const ids = plexClient.extractExternalIds(item);
+        if (ids.tvdb) moviesByTvdb.set(String(ids.tvdb), item);
+      }
+    } catch (err) {
+      errors.push(`Failed to read Plex movie section "${section.title}": ${err.message}`);
+    }
+  }
+
+  const showsByTvdb = new Map();
+  for (const section of tvSections) {
+    try {
+      const items = await plexClient.getSectionItems(section.key);
+      for (const item of items) {
+        const ids = plexClient.extractExternalIds(item);
+        if (ids.tvdb) showsByTvdb.set(String(ids.tvdb), item);
+      }
+    } catch (err) {
+      errors.push(`Failed to read Plex TV section "${section.title}": ${err.message}`);
+    }
+  }
+
+  return { moviesByTvdb, showsByTvdb, errors };
+}
+
+/**
  * Cross-references Harvest's catalog (shows, movies, episodes, season packs)
  * against a Plex Media Server library and flags what's already in Plex.
  *
@@ -39,38 +92,13 @@ async function syncPlexFlags(pool, plexClient = buildPlexClientFromEnv()) {
     errors: [],
   };
 
-  const sections = await plexClient.getSections();
-
-  const tvSectionFilter = process.env.PLEX_TV_SECTION_ID ? String(process.env.PLEX_TV_SECTION_ID) : null;
-  const movieSectionFilter = process.env.PLEX_MOVIE_SECTION_ID ? String(process.env.PLEX_MOVIE_SECTION_ID) : null;
-
-  const tvSections = sections.filter(
-    (s) => s.type === 'show' && (!tvSectionFilter || String(s.key) === tvSectionFilter)
-  );
-  const movieSections = sections.filter(
-    (s) => s.type === 'movie' && (!movieSectionFilter || String(s.key) === movieSectionFilter)
-  );
-
-  if (tvSections.length === 0 && movieSections.length === 0) {
-    summary.errors.push('No matching TV or Movie sections found on the Plex server.');
-  }
+  const { moviesByTvdb: plexMoviesByTvdb, showsByTvdb: plexShowsByTvdb, errors: indexErrors } =
+    await buildPlexIndex(plexClient);
+  summary.errors.push(...indexErrors);
 
   // ============================================================
   // MOVIES
   // ============================================================
-  const plexMoviesByTvdb = new Map();
-  for (const section of movieSections) {
-    try {
-      const items = await plexClient.getSectionItems(section.key);
-      for (const item of items) {
-        const ids = plexClient.extractExternalIds(item);
-        if (ids.tvdb) plexMoviesByTvdb.set(String(ids.tvdb), item);
-      }
-    } catch (err) {
-      summary.errors.push(`Failed to read Plex movie section "${section.title}": ${err.message}`);
-    }
-  }
-
   const harvestMovies = await pool.query('SELECT id, tvdb_id FROM metadata_movies');
   summary.movies_checked = harvestMovies.rows.length;
 
@@ -92,19 +120,6 @@ async function syncPlexFlags(pool, plexClient = buildPlexClientFromEnv()) {
   // ============================================================
   // TV SHOWS, EPISODES, SEASON PACKS
   // ============================================================
-  const plexShowsByTvdb = new Map();
-  for (const section of tvSections) {
-    try {
-      const items = await plexClient.getSectionItems(section.key);
-      for (const item of items) {
-        const ids = plexClient.extractExternalIds(item);
-        if (ids.tvdb) plexShowsByTvdb.set(String(ids.tvdb), item);
-      }
-    } catch (err) {
-      summary.errors.push(`Failed to read Plex TV section "${section.title}": ${err.message}`);
-    }
-  }
-
   const harvestShows = await pool.query('SELECT id, tvdb_id FROM metadata_shows');
   summary.shows_checked = harvestShows.rows.length;
 
@@ -178,4 +193,73 @@ async function syncPlexFlags(pool, plexClient = buildPlexClientFromEnv()) {
   return summary;
 }
 
-module.exports = { syncPlexFlags, buildPlexClientFromEnv, PlexClient };
+/**
+ * Checks a single just-matched movie/episode/season-pack against an
+ * already-fetched Plex index (see buildPlexIndex) and writes
+ * in_plex/plex_rating_key/plex_checked_at for just that row.
+ *
+ * Called from matcher.js right after a metadata_items row is upserted, so
+ * evaluateSchedulerTrigger() (which reads metadata_items.in_plex to decide
+ * whether to auto-grab) sees an up-to-date flag instead of whatever the
+ * last scheduled plex_sync run happened to leave behind.
+ *
+ * entity = {
+ *   entityType: 'episode' | 'season_pack' | 'movie',
+ *   tvdbId: number|string,      // series or movie TVDB id
+ *   metadataItemId: number,     // the metadata_items row just matched
+ *   showId: number|null,        // set for episode/season_pack
+ *   movieId: number|null,       // set for movie
+ *   seasonNumber: number|null,  // set for episode/season_pack
+ *   episodeNumber: number|null, // set for episode only
+ * }
+ */
+async function checkEntityInPlex(pool, plexClient, plexIndex, entity) {
+  const { entityType, tvdbId, metadataItemId, showId, movieId, seasonNumber, episodeNumber } = entity;
+
+  if (entityType === 'movie') {
+    const plexItem = plexIndex.moviesByTvdb.get(String(tvdbId));
+    const inPlex = Boolean(plexItem);
+
+    await pool.query(
+      `UPDATE metadata_movies SET in_plex = $1, plex_rating_key = $2, plex_checked_at = CURRENT_TIMESTAMP WHERE id = $3`,
+      [inPlex, plexItem ? plexItem.ratingKey : null, movieId]
+    );
+    await pool.query(
+      `UPDATE metadata_items SET in_plex = $1, plex_checked_at = CURRENT_TIMESTAMP WHERE id = $2`,
+      [inPlex, metadataItemId]
+    );
+    return inPlex;
+  }
+
+  // episode or season_pack
+  const plexShow = plexIndex.showsByTvdb.get(String(tvdbId));
+  const showInPlex = Boolean(plexShow);
+
+  await pool.query(
+    `UPDATE metadata_shows SET in_plex = $1, plex_rating_key = $2, plex_checked_at = CURRENT_TIMESTAMP WHERE id = $3`,
+    [showInPlex, plexShow ? plexShow.ratingKey : null, showId]
+  );
+
+  let inPlex = false;
+  if (showInPlex && seasonNumber != null) {
+    const seasons = await plexClient.getChildren(plexShow.ratingKey);
+    const season = seasons.find((s) => s.type === 'season' && s.index === seasonNumber);
+    if (season) {
+      if (entityType === 'season_pack') {
+        // Same proxy syncPlexFlags uses: presence of the season stands in for the pack.
+        inPlex = true;
+      } else {
+        const episodes = await plexClient.getChildren(season.ratingKey);
+        inPlex = episodes.some((e) => e.type === 'episode' && e.index === episodeNumber);
+      }
+    }
+  }
+
+  await pool.query(
+    `UPDATE metadata_items SET in_plex = $1, plex_checked_at = CURRENT_TIMESTAMP WHERE id = $2`,
+    [inPlex, metadataItemId]
+  );
+  return inPlex;
+}
+
+module.exports = { syncPlexFlags, buildPlexClientFromEnv, buildPlexIndex, checkEntityInPlex, PlexClient };

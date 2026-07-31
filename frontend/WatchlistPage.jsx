@@ -5,6 +5,25 @@ import { AddToWatchlistModal } from './AddToWatchlistModal';
 const PAGE_SIZE = 24;
 const PLACEHOLDER_POSTER = 'https://via.placeholder.com/200x300?text=No+Poster';
 
+// AP-style month abbreviations (March/April/May/June/July stay unabbreviated;
+// September shortens to "Sept." rather than Intl's 3-letter "Sep").
+const MONTH_ABBREVIATIONS = [
+  'Jan.', 'Feb.', 'March', 'April', 'May', 'June',
+  'July', 'Aug.', 'Sept.', 'Oct.', 'Nov.', 'Dec.',
+];
+
+// TVDB sometimes only has a bare year on file for release_date (see
+// backend/tvdbMetadata.js's extractMovieFields fallback), which isn't a
+// real date — only reformat when it's a full YYYY-MM-DD value, otherwise
+// show it as-is rather than risk mangling a bare year.
+function formatReleaseDate(value) {
+  if (!value) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const d = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return value;
+  return `${MONTH_ABBREVIATIONS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+}
+
 function buildQueryString(params) {
   const parts = Object.entries(params)
     .filter(([, v]) => v !== '' && v != null)
@@ -162,7 +181,7 @@ export function WatchlistPage({ onOpenMovie, onOpenShow }) {
                   <h4 style={styles.cardTitle}>{displayTitle}</h4>
                   <div style={styles.metaRow}>
                     <span style={styles.typeBadge}>{item.type === 'movie' ? 'Movie' : 'TV Show'}</span>
-                    {item.release_date && <span style={styles.dateBadge}>{item.release_date}</span>}
+                    {item.release_date && <span style={styles.dateBadge}>Release: {formatReleaseDate(item.release_date)}</span>}
                   </div>
                   {libraryId ? (
                     <button

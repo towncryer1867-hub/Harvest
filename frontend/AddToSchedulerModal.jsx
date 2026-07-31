@@ -1,15 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { fetchJson } from './apiClient';
-
-const RESOLUTION_OPTIONS = [
-  { value: 'any', label: 'Any' },
-  { value: 'sd', label: 'SD' },
-  { value: '480p', label: '480p' },
-  { value: '720p', label: '720p' },
-  { value: '1080p', label: '1080p' },
-  { value: '2160p', label: '2160p' },
-  { value: '4k', label: '4K' },
-];
+import { RESOLUTION_OPTIONS } from './resolutionOptions';
 
 /**
  * Add/Edit modal for a scheduler entry. Two modes:

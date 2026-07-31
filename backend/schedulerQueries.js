@@ -1,4 +1,9 @@
+const { VALID_BUCKETS } = require('./resolutionBuckets');
+
 const VALID_SORTS = new Set(['added', 'title']);
+// 'any' is a valid resolution_preferences entry (see resolutionBuckets.js)
+// even though it isn't itself a resolution bucket, so it's filterable too.
+const VALID_RESOLUTION_FILTERS = new Set(['any', ...VALID_BUCKETS]);
 
 function parseSchedulerListQuery(req) {
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
@@ -7,11 +12,12 @@ function parseSchedulerListQuery(req) {
   const order = req.query.order === 'asc' ? 'ASC' : 'DESC';
   const search = (req.query.search || '').trim();
   const type = req.query.type === 'movie' || req.query.type === 'show' ? req.query.type : '';
+  const resolution = VALID_RESOLUTION_FILTERS.has(req.query.resolution) ? req.query.resolution : '';
 
-  return { page, limit, offset: (page - 1) * limit, sort, order, search, type };
+  return { page, limit, offset: (page - 1) * limit, sort, order, search, type, resolution };
 }
 
-function buildSchedulerQuery({ page, limit, offset, sort, order, search, type }) {
+function buildSchedulerQuery({ page, limit, offset, sort, order, search, type, resolution }) {
   const conditions = [];
   const params = [];
 
@@ -22,6 +28,10 @@ function buildSchedulerQuery({ page, limit, offset, sort, order, search, type })
   if (search) {
     params.push(`%${search}%`);
     conditions.push(`COALESCE(m.title, s.title) ILIKE $${params.length}`);
+  }
+  if (resolution) {
+    params.push(resolution);
+    conditions.push(`$${params.length} = ANY(si.resolution_preferences)`);
   }
 
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';

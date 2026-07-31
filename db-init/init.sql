@@ -194,6 +194,47 @@ CREATE TABLE IF NOT EXISTS watchlist (
 CREATE INDEX IF NOT EXISTS idx_watchlist_matched_movie ON watchlist(matched_movie_id);
 CREATE INDEX IF NOT EXISTS idx_watchlist_matched_show ON watchlist(matched_show_id);
 
+-- 10. User-maintained scheduler: movies/shows flagged for automatic
+-- download when a matching release is scraped. Distinct from watchlist
+-- (which just tracks "want to add to library") and distinct from the
+-- generic scheduled_jobs/jobScheduler.js automation runner above (that's
+-- for admin housekeeping jobs, not this feature) -- see
+-- backend/schedulerTrigger.js for the trigger flow run from matcher.js on
+-- every scrape match.
+CREATE TABLE IF NOT EXISTS scheduler_items (
+    id SERIAL PRIMARY KEY,
+    type VARCHAR(10) NOT NULL CHECK (type IN ('movie', 'show')),
+    movie_id INT REFERENCES metadata_movies(id) ON DELETE CASCADE,
+    show_id INT REFERENCES metadata_shows(id) ON DELETE CASCADE,
+    -- Multi-select: an empty/omitted selection is normalized to ['any'] at
+    -- the app layer (see backend/resolutionBuckets.js) rather than enforced
+    -- here, same convention as the unconstrained genres/studios TEXT[]
+    -- columns on metadata_shows/metadata_movies above.
+    resolution_preferences TEXT[] NOT NULL DEFAULT ARRAY['any']::TEXT[],
+    allow_season_packs BOOLEAN NOT NULL DEFAULT FALSE,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CHECK (
+        (type = 'movie' AND movie_id IS NOT NULL AND show_id IS NULL) OR
+        (type = 'show'  AND show_id  IS NOT NULL AND movie_id IS NULL)
+    )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduler_items_movie ON scheduler_items(movie_id) WHERE movie_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduler_items_show ON scheduler_items(show_id) WHERE show_id IS NOT NULL;
+
+-- Log of entities (episodes/movies) already auto-grabbed by the scheduler,
+-- keyed per-entity (not per-release) so a re-scrape of the same episode at
+-- a different resolution doesn't trigger a second download.
+CREATE TABLE IF NOT EXISTS scheduler_log (
+    id SERIAL PRIMARY KEY,
+    scheduler_item_id INT NOT NULL REFERENCES scheduler_items(id) ON DELETE CASCADE,
+    metadata_item_id INT NOT NULL REFERENCES metadata_items(id) ON DELETE CASCADE,
+    resolution VARCHAR(10),
+    downloaded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(scheduler_item_id, metadata_item_id)
+);
+
 -- 8. Diagnostic event log for the background pipeline (scraper, matcher,
 -- Plex sync, TVDB refresh, cleanup, scheduled jobs). Lets Admin Controls
 -- surface silent failures (e.g. TVDB auth failing every cycle) that would

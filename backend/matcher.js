@@ -2,9 +2,12 @@ const { parseMediaTitle } = require('./mediaParser');
 const { pickEnglishTranslation, extractSeriesFields, extractMovieFields, computeRecentAirDate } = require('./tvdbMetadata');
 const { logPipelineEvent } = require('./pipelineLog');
 const { syncShowCast, syncMovieCast } = require('./castSync');
+const { buildQBittorrentClientFromEnv } = require('./qbittorrentClient');
+const { evaluateSchedulerTrigger } = require('./schedulerTrigger');
 
 async function processPendingMatches(pool, tvdb) {
   console.log(`[${new Date().toISOString()}] Running advanced metadata matching cycle...`);
+  const qbClient = buildQBittorrentClientFromEnv();
 
   try {
     await tvdb.authenticate();
@@ -14,7 +17,7 @@ async function processPendingMatches(pool, tvdb) {
     // never-clearing rows (see the `else` below) could keep crowding out
     // newer entries from ever being selected at all.
     const pending = await pool.query(
-      "SELECT id, title, category, match_status FROM scraped_entries WHERE match_status IN ('unmatched') ORDER BY id ASC LIMIT 10"
+      "SELECT id, title, category, match_status, magnet_link FROM scraped_entries WHERE match_status IN ('unmatched') ORDER BY id ASC LIMIT 10"
     );
 
     for (const entry of pending.rows) {
@@ -49,6 +52,9 @@ async function processPendingMatches(pool, tvdb) {
 
         const rootAsset = results[0];
         let finalMetadataId = null;
+        let triggerEntityType = null;
+        let triggerShowId = null;
+        let triggerMovieId = null;
 
         // ==========================================
         // CASE A: IT'S A TV SHOW (EPISODE OR SEASON PACK)
@@ -183,6 +189,8 @@ async function processPendingMatches(pool, tvdb) {
               matchEp ? matchEp.aired : parsed.air_date
             ]);
             finalMetadataId = itemRow.rows[0].id;
+            triggerEntityType = 'episode';
+            triggerShowId = showId;
 
             console.log(`Matched Episode ID ${matchEp ? matchEp.id : 'N/A'}: "${matchEp ? matchEp.name : parsed.air_date}" (Aired: ${matchEp ? matchEp.aired : parsed.air_date})`);
 
@@ -241,6 +249,8 @@ async function processPendingMatches(pool, tvdb) {
               matchEp ? matchEp.aired : null
             ]);
             finalMetadataId = itemRow.rows[0].id;
+            triggerEntityType = 'episode';
+            triggerShowId = showId;
 
             console.log(`Matched Episode ID ${matchEp ? matchEp.id : 'N/A'}: "${matchEp ? matchEp.name : parsed.episode}" (Aired: ${matchEp ? matchEp.aired : 'N/A'})`);
 
@@ -290,6 +300,8 @@ async function processPendingMatches(pool, tvdb) {
               null
             ]);
             finalMetadataId = itemRow.rows[0].id;
+            triggerEntityType = 'season_pack';
+            triggerShowId = showId;
 
             console.log(`Matched Season Pack: "${parsed.season}"`);
           }
@@ -376,6 +388,8 @@ async function processPendingMatches(pool, tvdb) {
             movieMeta.overview
           ]);
           finalMetadataId = itemRow.rows[0].id;
+          triggerEntityType = 'movie';
+          triggerMovieId = movieId;
         }
 
         if (finalMetadataId) {
@@ -383,6 +397,26 @@ async function processPendingMatches(pool, tvdb) {
             "UPDATE scraped_entries SET metadata_item_id = $1, match_status = 'matched' WHERE id = $2",
             [finalMetadataId, entry.id]
           );
+
+          if (triggerEntityType) {
+            try {
+              await evaluateSchedulerTrigger(pool, qbClient, {
+                entityType: triggerEntityType,
+                metadataItemId: finalMetadataId,
+                showId: triggerShowId,
+                movieId: triggerMovieId,
+                resolutionRaw: parsed.resolution,
+                magnetLink: entry.magnet_link,
+              });
+            } catch (triggerErr) {
+              console.error(`Scheduler trigger failed for entry ID ${entry.id}:`, triggerErr.message);
+              await logPipelineEvent(pool, {
+                source: 'scheduler',
+                message: `Scheduler trigger failed for entry ${entry.id} ("${entry.title}"): ${triggerErr.message}`,
+                detail: triggerErr.stack,
+              });
+            }
+          }
         } else {
           // A TV-categorized title that didn't match the dated/S-E/season-pack
           // cases above (or a movie search that somehow produced no usable

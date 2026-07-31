@@ -21,6 +21,8 @@ const { logPipelineEvent } = require('./pipelineLog');
 const { syncShowCast, syncMovieCast } = require('./castSync');
 const { parseWatchlistListQuery, buildWatchlistQuery } = require('./watchlistQueries');
 const { matchWatchlistItem } = require('./watchlistMatcher');
+const { parseSchedulerListQuery, buildSchedulerQuery } = require('./schedulerQueries');
+const { normalizeResolutionPreferences } = require('./resolutionBuckets');
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -93,7 +95,10 @@ app.get('/api/media/movies/:movieId', async (req, res) => {
       `SELECT id, tvdb_id, title, overview, poster_path, release_date, release_year,
               genres, studios, production_companies, original_country, original_language,
               in_plex, plex_checked_at, trailer_url, imdb_id,
-              EXISTS(SELECT 1 FROM watchlist w WHERE w.matched_movie_id = metadata_movies.id) AS in_watchlist
+              EXISTS(SELECT 1 FROM watchlist w WHERE w.matched_movie_id = metadata_movies.id) AS in_watchlist,
+              (SELECT si.id FROM scheduler_items si WHERE si.movie_id = metadata_movies.id) AS scheduler_item_id,
+              (SELECT si.enabled FROM scheduler_items si WHERE si.movie_id = metadata_movies.id) AS scheduler_enabled,
+              (SELECT si.resolution_preferences FROM scheduler_items si WHERE si.movie_id = metadata_movies.id) AS scheduler_resolution_preferences
        FROM metadata_movies WHERE id = $1`,
       [parseInt(movieId, 10)]
     );
@@ -299,6 +304,131 @@ app.delete('/api/watchlist/:id', async (req, res) => {
   }
 });
 
+// =========================================================================
+// SCHEDULER API ENDPOINTS
+// =========================================================================
+
+// SCHEDULER: List entries with search, sort, type filter, and pagination
+app.get('/api/scheduler', async (req, res) => {
+  try {
+    const listQuery = parseSchedulerListQuery(req);
+    const built = buildSchedulerQuery(listQuery);
+
+    const [countResult, items] = await Promise.all([
+      pool.query(built.countSql, built.params),
+      pool.query(built.dataSql, built.dataParams),
+    ]);
+
+    const total = countResult.rows[0].total;
+    const { page, limit } = built.pagination;
+
+    res.json({
+      items: items.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: Math.max(1, Math.ceil(total / limit)),
+      },
+    });
+  } catch (err) {
+    console.error("Error fetching scheduler list:", err.message);
+    sendError(res, err);
+  }
+});
+
+// SCHEDULER: Add a show to the scheduler (from the "Add to Scheduler"
+// button on the Show detail page). Movie scheduling has been removed from
+// the product surface — `type` is hard-coded to 'show' here rather than
+// stripped from the schema/queries, so the movie_id half of scheduler_items
+// (and schedulerTrigger.js's movie branch) stays intact as dead-but-cheap
+// infrastructure instead of a rewrite if this needs to come back.
+// The unique partial index on scheduler_items(show_id) backs the 409 below
+// — a show can only be scheduled once, matching Edit being the only way to
+// change it afterwards.
+app.post('/api/scheduler', async (req, res) => {
+  const type = 'show';
+  const { show_id, resolution_preferences, allow_season_packs } = req.body;
+
+  const entityId = parseInt(show_id, 10);
+  if (!entityId || Number.isNaN(entityId)) {
+    return res.status(400).json({ error: 'show_id is required.' });
+  }
+  const resPrefs = normalizeResolutionPreferences(resolution_preferences);
+  if (!resPrefs) {
+    return res.status(400).json({ error: 'Invalid resolution_preferences.' });
+  }
+
+  try {
+    const entityExists = await pool.query('SELECT id FROM metadata_shows WHERE id = $1', [entityId]);
+    if (entityExists.rowCount === 0) {
+      return res.status(404).json({ error: 'Show not found.' });
+    }
+
+    const existing = await pool.query(
+      `SELECT id FROM scheduler_items WHERE show_id = $1`,
+      [entityId]
+    );
+    if (existing.rowCount > 0) {
+      return res.status(409).json({ error: 'That title is already on the scheduler.' });
+    }
+
+    const inserted = await pool.query(
+      `INSERT INTO scheduler_items (type, movie_id, show_id, resolution_preferences, allow_season_packs, enabled)
+       VALUES ($1, NULL, $2, $3, $4, TRUE) RETURNING *`,
+      [type, entityId, resPrefs, !!allow_season_packs]
+    );
+
+    res.status(201).json({ success: true, item: inserted.rows[0] });
+  } catch (err) {
+    console.error("Error adding scheduler item:", err.message);
+    sendError(res, err);
+  }
+});
+
+// SCHEDULER: Update resolution preferences / season-pack policy / enabled
+// state (the Edit modal, opened from the Scheduler listing page or the
+// detail page's "Edit Scheduler" button).
+app.put('/api/scheduler/:id', async (req, res) => {
+  const { resolution_preferences, allow_season_packs, enabled } = req.body;
+
+  const resPrefs = normalizeResolutionPreferences(resolution_preferences);
+  if (!resPrefs) {
+    return res.status(400).json({ error: 'Invalid resolution_preferences.' });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE scheduler_items
+       SET resolution_preferences = $1, allow_season_packs = $2, enabled = $3, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $4
+       RETURNING *`,
+      [resPrefs, !!allow_season_packs, enabled !== false, parseInt(req.params.id, 10)]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Scheduler item not found.' });
+    }
+    res.json({ success: true, item: result.rows[0] });
+  } catch (err) {
+    console.error("Error updating scheduler item:", err.message);
+    sendError(res, err);
+  }
+});
+
+// SCHEDULER: Remove an item
+app.delete('/api/scheduler/:id', async (req, res) => {
+  try {
+    const result = await pool.query('DELETE FROM scheduler_items WHERE id = $1 RETURNING id', [parseInt(req.params.id, 10)]);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Scheduler item not found.' });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Error removing scheduler item:", err.message);
+    sendError(res, err);
+  }
+});
+
 // TV: Single show profile (for deep-link / navigation restore)
 app.get('/api/media/shows/:showId/profile', async (req, res) => {
   const { showId } = req.params;
@@ -308,6 +438,10 @@ app.get('/api/media/shows/:showId/profile', async (req, res) => {
               s.first_aired, s.last_aired, s.original_country, s.original_language,
               s.in_plex, s.plex_checked_at, s.trailer_url, s.imdb_id,
               EXISTS(SELECT 1 FROM watchlist w WHERE w.matched_show_id = s.id) AS in_watchlist,
+              (SELECT si.id FROM scheduler_items si WHERE si.show_id = s.id) AS scheduler_item_id,
+              (SELECT si.enabled FROM scheduler_items si WHERE si.show_id = s.id) AS scheduler_enabled,
+              (SELECT si.resolution_preferences FROM scheduler_items si WHERE si.show_id = s.id) AS scheduler_resolution_preferences,
+              (SELECT si.allow_season_packs FROM scheduler_items si WHERE si.show_id = s.id) AS scheduler_allow_season_packs,
               pub.latest_published
        FROM metadata_shows s
        LEFT JOIN LATERAL (
